@@ -1,0 +1,8 @@
+pyinstaller
+dateparser
+python-dotenv
+requests
+psutil
+pillow
+pydantic
+cryptography
