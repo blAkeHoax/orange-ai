@@ -58,6 +58,25 @@ jobs:
       - name: Build frontend assets
         run: npm run build
 
+      - name: Ensure release tag exists on orange-ai-build
+        shell: pwsh
+        env:
+          RELEASE_REPO_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+          TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          git clone "https://x-access-token:${env:RELEASE_REPO_TOKEN}@github.com/blAkeHoax/orange-ai-build.git" "$env:RUNNER_TEMP\release-repo"
+          Set-Location "$env:RUNNER_TEMP\release-repo"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if (-not (Test-Path "README.md")) {
+            "# Orange AI Desktop — Signed Releases" | Out-File -Encoding utf8 README.md
+            git add README.md
+            git commit -m "chore: initialize release repository"
+            git push origin HEAD:main
+          }
+          git tag -f "$env:TAG_NAME"
+          git push -f origin "$env:TAG_NAME"
+
       - name: Build Tauri application and create release
         uses: tauri-apps/tauri-action@v0
         env:
