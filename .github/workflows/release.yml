@@ -67,6 +67,7 @@ jobs:
         with:
           owner: blAkeHoax
           repo: orange-ai-build
+          args: --target x86_64-pc-windows-msvc
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: 'Orange AI Desktop ${{ github.event.inputs.tag || github.ref_name }}'
           releaseBody: 'Automated production release of Orange AI Desktop ${{ github.event.inputs.tag || github.ref_name }} with signed auto-updater bundle.'
