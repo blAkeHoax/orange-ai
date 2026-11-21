@@ -1,0 +1,13 @@
+{
+  "test": "HOSTED_ORANGE_API_INFERENCE_SMOKE_TEST",
+  "status": "PASS",
+  "endpoint": "https://orange-api-cuuo.onrender.com",
+  "submissionTime": "2026-11-14T11:23:53.316Z",
+  "responseTime": "2026-11-14T11:23:56.468Z",
+  "durationSeconds": 3.152,
+  "testMessage": "Explain in two short sentences what Orange AI does.",
+  "assistantReply": "Orange AI is a personal desktop assistant that helps manage your computer — opening apps, finding files, checking system stats. It also serves as a conversational companion for general questions, explanations, and casual chat.",
+  "modelTag": "NVIDIA:NVIDIA/NEMOTRON-3.5-LIGHTNING-30B-A3B",
+  "screenshot": "smoke_test_hosted_chat.png",
+  "screenshotBytes": 79468
+}

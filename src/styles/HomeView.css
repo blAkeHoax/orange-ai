@@ -1,0 +1,434 @@
+/* Home View Layout */
+
+.home-view-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-workspace);
+  transition: background-color var(--transition-fast);
+}
+
+.home-top-bar {
+  padding: 20px 28px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+}
+
+.home-hero-area {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0 48px 100px 48px;
+  overflow: hidden;
+}
+
+.home-hero-left {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 640px;
+  width: 100%;
+  z-index: 10;
+}
+
+/* Ongoing Context & Reminders Strip */
+.home-context-strip {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 12px 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 240px;
+  transition: border-color var(--transition-fast);
+}
+
+.home-context-strip:hover {
+  border-color: var(--border-strong);
+}
+
+.context-strip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.context-tab-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.context-tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.context-tab-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.context-tab-btn.is-active {
+  background: var(--color-orange-subtle);
+  border-color: rgba(255, 107, 0, 0.3);
+  color: var(--color-orange);
+  font-weight: 600;
+}
+
+.tab-count {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 9999px;
+  background: rgba(255, 107, 0, 0.2);
+  color: var(--color-orange);
+  font-weight: 600;
+}
+
+.context-strip-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-context-action {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-context-action:hover {
+  color: var(--color-orange);
+  border-color: var(--color-orange);
+  background: rgba(255, 107, 0, 0.08);
+}
+
+.context-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  color: #ef4444;
+}
+
+.context-strip-body {
+  overflow-y: auto;
+  max-height: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 4px;
+}
+
+/* Custom scrollbar for context strip */
+.context-strip-body::-webkit-scrollbar {
+  width: 4px;
+}
+.context-strip-body::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 4px;
+}
+
+.context-empty-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 8px 0;
+  text-align: center;
+}
+
+/* Projects list */
+.context-projects-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.context-project-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  background: var(--bg-workspace);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.context-project-card:hover {
+  border-color: var(--color-orange);
+  background: var(--bg-card-hover);
+}
+
+.context-project-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.context-project-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.context-branch-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
+.context-status-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.context-status-badge.is-clean {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.context-status-badge.is-changed {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.context-status-badge.is-baseline {
+  background: rgba(156, 163, 175, 0.15);
+  color: #9ca3af;
+}
+
+.context-uncommitted-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+
+/* Reminders list & quick add */
+.context-reminders-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.context-add-reminder-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 4px;
+}
+
+.reminder-lead-time-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.lead-time-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.lead-time-pill {
+  padding: 3px 6px;
+  font-size: 10px;
+  font-weight: 500;
+  background: var(--bg-workspace);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.lead-time-pill:hover {
+  border-color: var(--text-muted);
+}
+
+.lead-time-pill.is-selected {
+  border-color: var(--color-orange);
+  background: var(--color-orange-subtle);
+  color: var(--color-orange);
+  font-weight: 600;
+}
+
+.lead-time-badge {
+  font-size: 10px;
+  color: var(--color-orange);
+  font-weight: 500;
+}
+
+.context-reminder-input {
+  flex: 1;
+  padding: 5px 10px;
+  background: var(--bg-workspace);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+}
+
+.context-reminder-input:focus {
+  border-color: var(--color-orange);
+}
+
+.context-reminder-datetime {
+  padding: 5px 8px;
+  background: var(--bg-workspace);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 11px;
+  outline: none;
+}
+
+.context-reminder-datetime:focus {
+  border-color: var(--color-orange);
+}
+
+.btn-save-reminder {
+  padding: 5px 10px;
+  background: var(--color-orange);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-save-reminder:hover:not(:disabled) {
+  background: var(--color-orange-hover);
+}
+
+.btn-save-reminder:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-cancel-reminder {
+  padding: 5px 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.context-reminder-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--bg-workspace);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  transition: all var(--transition-fast);
+}
+
+.context-reminder-card:hover {
+  border-color: var(--border-strong);
+}
+
+.context-reminder-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.context-reminder-msg {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-reminder-time {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.btn-cancel-rem-item {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-fast);
+}
+
+.btn-cancel-rem-item:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+}
+
+@media (max-width: 900px) {
+  .home-top-bar {
+    padding: 16px 20px;
+  }
+  .home-hero-area {
+    padding: 0 28px 100px 28px;
+  }
+}
