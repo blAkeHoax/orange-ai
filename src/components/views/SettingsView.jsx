@@ -18,9 +18,14 @@ import {
   Edit3,
   Save,
   X,
-  Check
+  Check,
+  Zap,
+  Play,
+  Trash2,
+  Plus,
+  Loader2
 } from 'lucide-react';
-import { pingAdapter, getHealth, getSettings, updateSettings, triggerBriefing } from '../../services/tauriBridge';
+import { pingAdapter, getHealth, getSettings, updateSettings, triggerBriefing, setMinimizeToTray, listSkills, createSkill, toggleSkill, deleteSkill, runSkill } from '../../services/tauriBridge';
 import { useTheme } from '../../context/ThemeContext';
 import '../../styles/SecondaryViews.css';
 
@@ -91,8 +96,18 @@ export default function SettingsView() {
   const [quietHoursEndInput, setQuietHoursEndInput] = useState('07:00');
   const [quietHoursError, setQuietHoursError] = useState('');
 
+  // Intelligence & Adaptive Empathy State (Stage 5B)
+  const [hybridMemoryEnabled, setHybridMemoryEnabled] = useState(true);
+  const [adaptiveEmpathyEnabled, setAdaptiveEmpathyEnabled] = useState(true);
+  const [confidenceThreshold, setConfidenceThreshold] = useState(0.75);
+  const [empathyStatusMsg, setEmpathyStatusMsg] = useState('');
+
   // Idle Inactivity Threshold State (GAP-4A-7)
   const [idleThresholdMinutes, setIdleThresholdMinutes] = useState(10);
+
+  // System Tray & Desktop Toasts State (Stage 5C)
+  const [minimizeToTrayEnabled, setMinimizeToTrayEnabled] = useState(true);
+  const [desktopToastsEnabled, setDesktopToastsEnabled] = useState(true);
 
   // Editable Orange API URL State
   const [apiUrl, setApiUrl] = useState('https://orange-api-cuuo.onrender.com');
@@ -102,8 +117,34 @@ export default function SettingsView() {
   const [urlStatusMsg, setUrlStatusMsg] = useState('');
   const [savingUrl, setSavingUrl] = useState(false);
 
+  // Stage 5E: Reusable Orange Skills State
+  const [skillsList, setSkillsList] = useState([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsStatusMsg, setSkillsStatusMsg] = useState('');
+  const [runningSkillSlug, setRunningSkillSlug] = useState(null);
+  const [showNewSkillForm, setShowNewSkillForm] = useState(false);
+  const [newSkillName, setNewSkillName] = useState('');
+  const [newSkillSlug, setNewSkillSlug] = useState('');
+  const [newSkillDesc, setNewSkillDesc] = useState('');
+  const [newSkillTemplate, setNewSkillTemplate] = useState('');
+  const [newSkillCommand, setNewSkillCommand] = useState('');
+  const [newSkillError, setNewSkillError] = useState('');
+
+  const fetchSkillsData = async () => {
+    setSkillsLoading(true);
+    try {
+      const res = await listSkills();
+      if (Array.isArray(res)) setSkillsList(res);
+    } catch (e) {
+      console.warn('Error fetching skills list:', e);
+    } finally {
+      setSkillsLoading(false);
+    }
+  };
+
   const fetchSettingsAndStatus = async () => {
     setLoading(true);
+    fetchSkillsData();
     try {
       const [ping, health, conf] = await Promise.all([
         pingAdapter(),
@@ -152,6 +193,26 @@ export default function SettingsView() {
       }
       if (conf?.idle_threshold_minutes) {
         setIdleThresholdMinutes(Number(conf.idle_threshold_minutes));
+      }
+
+      // Populate Intelligence & Adaptive Empathy settings
+      if (typeof conf?.hybrid_memory_extraction_enabled === 'boolean') {
+        setHybridMemoryEnabled(conf.hybrid_memory_extraction_enabled);
+      }
+      if (typeof conf?.adaptive_empathy_enabled === 'boolean') {
+        setAdaptiveEmpathyEnabled(conf.adaptive_empathy_enabled);
+      }
+      if (typeof conf?.hybrid_memory_confidence_threshold === 'number') {
+        setConfidenceThreshold(conf.hybrid_memory_confidence_threshold);
+      }
+
+      // Populate System Tray & Desktop Toasts settings (Stage 5C)
+      if (typeof conf?.minimize_to_tray_enabled === 'boolean') {
+        setMinimizeToTrayEnabled(conf.minimize_to_tray_enabled);
+        setMinimizeToTray(conf.minimize_to_tray_enabled);
+      }
+      if (typeof conf?.desktop_toasts_enabled === 'boolean') {
+        setDesktopToastsEnabled(conf.desktop_toasts_enabled);
       }
 
       // Populate API URL
@@ -344,6 +405,148 @@ export default function SettingsView() {
   const flashProactiveStatus = (msg, isError = false) => {
     setProactiveStatusMsg(msg);
     setTimeout(() => setProactiveStatusMsg(''), 3500);
+  };
+
+  // Intelligence & Adaptive Empathy Handlers (Stage 5B)
+  const flashEmpathyStatus = (msg, isError = false) => {
+    setEmpathyStatusMsg(msg);
+    setTimeout(() => setEmpathyStatusMsg(''), 3500);
+  };
+
+  const handleToggleHybridMemory = async () => {
+    const nextVal = !hybridMemoryEnabled;
+    setHybridMemoryEnabled(nextVal);
+    try {
+      await updateSettings({ hybrid_memory_extraction_enabled: nextVal });
+      flashEmpathyStatus(nextVal ? '✓ Hybrid LLM Memory Extraction Enabled' : '✓ Hybrid LLM Memory Extraction Disabled');
+    } catch (err) {
+      setHybridMemoryEnabled(!nextVal);
+      flashEmpathyStatus('Error updating memory extraction setting', true);
+    }
+  };
+
+  const handleToggleAdaptiveEmpathy = async () => {
+    const nextVal = !adaptiveEmpathyEnabled;
+    setAdaptiveEmpathyEnabled(nextVal);
+    try {
+      await updateSettings({ adaptive_empathy_enabled: nextVal });
+      flashEmpathyStatus(nextVal ? '✓ Adaptive Emotional & Pacing Calibration Enabled' : '✓ Adaptive Emotional & Pacing Calibration Disabled');
+    } catch (err) {
+      setAdaptiveEmpathyEnabled(!nextVal);
+      flashEmpathyStatus('Error updating adaptive empathy setting', true);
+    }
+  };
+
+  const handleSelectConfidenceThreshold = async (val) => {
+    if (Math.abs(val - confidenceThreshold) < 0.001) return;
+    setConfidenceThreshold(val);
+    try {
+      await updateSettings({ hybrid_memory_confidence_threshold: val });
+      flashEmpathyStatus(`✓ Confidence Threshold set to ${val.toFixed(2)}`);
+    } catch (err) {
+      flashEmpathyStatus('Error updating confidence threshold', true);
+    }
+  };
+
+  // Reusable Orange Skills Handlers (Stage 5E)
+  const flashSkillsStatus = (msg) => {
+    setSkillsStatusMsg(msg);
+    setTimeout(() => setSkillsStatusMsg(''), 4000);
+  };
+
+  const handleToggleSkill = async (slug) => {
+    try {
+      await toggleSkill(slug);
+      await fetchSkillsData();
+      flashSkillsStatus(`Toggled skill: /skill ${slug}`);
+    } catch (e) {
+      flashSkillsStatus(`Error toggling skill: ${e.message}`);
+    }
+  };
+
+  const handleRunSkill = async (slug) => {
+    setRunningSkillSlug(slug);
+    flashSkillsStatus(`Running /skill ${slug}...`);
+    try {
+      await runSkill(slug);
+      flashSkillsStatus(`✓ Skill '${slug}' completed successfully`);
+    } catch (e) {
+      flashSkillsStatus(`Error executing skill: ${e.message}`);
+    } finally {
+      setRunningSkillSlug(null);
+    }
+  };
+
+  const handleDeleteSkill = async (slug) => {
+    try {
+      await deleteSkill(slug);
+      await fetchSkillsData();
+      flashSkillsStatus(`Deleted custom skill: ${slug}`);
+    } catch (e) {
+      flashSkillsStatus(`Error deleting skill: ${e.message}`);
+    }
+  };
+
+  const handleCreateNewSkill = async (e) => {
+    if (e) e.preventDefault();
+    setNewSkillError('');
+    const slug = newSkillSlug.trim().toLowerCase();
+    if (!slug) {
+      setNewSkillError('Slug is required (e.g. "my-routine").');
+      return;
+    }
+    if (!/^[a-z0-9_-]+$/.test(slug)) {
+      setNewSkillError('Slug must contain only lowercase letters, numbers, hyphens, and underscores.');
+      return;
+    }
+    if (!newSkillName.trim()) {
+      setNewSkillError('Skill name is required.');
+      return;
+    }
+    try {
+      await createSkill({
+        slug,
+        name: newSkillName.trim(),
+        description: newSkillDesc.trim(),
+        prompt_template: newSkillTemplate.trim(),
+        command: newSkillCommand.trim() || 'git status --short',
+      });
+      setNewSkillName('');
+      setNewSkillSlug('');
+      setNewSkillDesc('');
+      setNewSkillTemplate('');
+      setNewSkillCommand('');
+      setShowNewSkillForm(false);
+      await fetchSkillsData();
+      flashSkillsStatus(`✓ Created custom skill: /skill ${slug}`);
+    } catch (e) {
+      setNewSkillError(e.message || 'Failed to create skill.');
+    }
+  };
+
+  const handleToggleMinimizeToTray = async () => {
+    const nextVal = !minimizeToTrayEnabled;
+    setMinimizeToTrayEnabled(nextVal);
+    try {
+      await updateSettings({ minimize_to_tray_enabled: nextVal });
+      await setMinimizeToTray(nextVal);
+      flashProactiveStatus(nextVal ? '✓ Minimize to Tray Enabled' : '✓ Minimize to Tray Disabled');
+    } catch (err) {
+      setMinimizeToTrayEnabled(!nextVal);
+      flashProactiveStatus('Error updating tray setting', true);
+    }
+  };
+
+  const handleToggleDesktopToasts = async () => {
+    const nextVal = !desktopToastsEnabled;
+    setDesktopToastsEnabled(nextVal);
+    try {
+      await updateSettings({ desktop_toasts_enabled: nextVal });
+      flashProactiveStatus(nextVal ? '✓ Desktop Toasts Enabled' : '✓ Desktop Toasts Disabled');
+    } catch (err) {
+      setDesktopToastsEnabled(!nextVal);
+      flashProactiveStatus('Error updating desktop toasts setting', true);
+    }
   };
 
   // 4. API URL Handlers (Scope D)
@@ -748,9 +951,288 @@ export default function SettingsView() {
               </div>
             )}
 
+            {/* Control 7: Minimize to System Tray (Stage 5C) */}
+            <div className="proactive-row">
+              <div className="proactive-label-group">
+                <span className="proactive-title">Minimize to System Tray</span>
+                <span className="proactive-subtitle">
+                  Keep Orange AI running in the background when closing the window so scheduled reminders and briefings stay active.
+                </span>
+              </div>
+              <button
+                type="button"
+                className={`switch-toggle-btn ${minimizeToTrayEnabled ? 'is-active' : ''}`}
+                onClick={handleToggleMinimizeToTray}
+                title={minimizeToTrayEnabled ? 'Disable Minimize to Tray' : 'Enable Minimize to Tray'}
+              >
+                <span className="toggle-slider" />
+              </button>
+            </div>
+
+            {/* Control 8: Desktop Toast Notifications (Stage 5C) */}
+            <div className="proactive-row">
+              <div className="proactive-label-group">
+                <span className="proactive-title">Desktop Toast Notifications</span>
+                <span className="proactive-subtitle">
+                  Display native Windows toast notifications when background events, due reminders, or briefings arrive.
+                </span>
+              </div>
+              <button
+                type="button"
+                className={`switch-toggle-btn ${desktopToastsEnabled ? 'is-active' : ''}`}
+                onClick={handleToggleDesktopToasts}
+                title={desktopToastsEnabled ? 'Disable Desktop Toasts' : 'Enable Desktop Toasts'}
+              >
+                <span className="toggle-slider" />
+              </button>
+            </div>
+
             {/* Active Proactive Engine Status (Stage 4) */}
             <div className="proactive-disclaimer-box">
               <span className="disclaimer-title">Proactive Engine Active:</span> Morning briefings, due reminder evaluation, and contextual advisories are running autonomously with local crash recovery and persistent outbox delivery.
+            </div>
+          </div>
+        </div>
+
+        {/* ============================================================== */}
+        {/* SECTION: Intelligence & Adaptive Empathy (Stage 5B)             */}
+        {/* ============================================================== */}
+        <div className="settings-section-card">
+          <div className="section-card-header">
+            <Sparkles size={18} className="text-orange" />
+            <div className="section-card-title-group">
+              <span className="section-card-title">Intelligence & Adaptive Empathy</span>
+              {empathyStatusMsg && (
+                <span className="section-status-pill">{empathyStatusMsg}</span>
+              )}
+            </div>
+          </div>
+          <p className="section-card-desc">
+            Hybrid memory extraction via MiniMax M3.1 Flash and real-time emotional and cognitive pacing calibration on Nemotron 3.5 Bolt E4B.
+          </p>
+
+          <div className="proactive-controls-list">
+            {/* Control 1: Hybrid LLM Memory Extraction */}
+            <div className="proactive-row">
+              <div className="proactive-label-group">
+                <span className="proactive-title">Hybrid LLM Memory Extraction</span>
+                <span className="proactive-subtitle">
+                  Extract structured long-term memories in parallel using MiniMax M3.1 Flash alongside deterministic regex rules.
+                </span>
+              </div>
+              <button
+                type="button"
+                className={`switch-toggle-btn ${hybridMemoryEnabled ? 'is-active' : ''}`}
+                onClick={handleToggleHybridMemory}
+                title={hybridMemoryEnabled ? 'Disable Hybrid Memory Extraction' : 'Enable Hybrid Memory Extraction'}
+              >
+                <span className="toggle-slider" />
+              </button>
+            </div>
+
+            {/* Control 2: Adaptive Emotional & Pacing Calibration */}
+            <div className="proactive-row">
+              <div className="proactive-label-group">
+                <span className="proactive-title">Adaptive Emotional & Pacing Calibration</span>
+                <span className="proactive-subtitle">
+                  Inject pre-turn emotional and cognitive load calibration directives (&lt; 2ms) to align response tone and pacing.
+                </span>
+              </div>
+              <button
+                type="button"
+                className={`switch-toggle-btn ${adaptiveEmpathyEnabled ? 'is-active' : ''}`}
+                onClick={handleToggleAdaptiveEmpathy}
+                title={adaptiveEmpathyEnabled ? 'Disable Adaptive Calibration' : 'Enable Adaptive Calibration'}
+              >
+                <span className="toggle-slider" />
+              </button>
+            </div>
+
+            {/* Control 3: Confidence Threshold Selector */}
+            <div className="proactive-row is-sub-control">
+              <div className="proactive-label-group">
+                <span className="proactive-title">Memory Confidence Threshold</span>
+                <span className="proactive-subtitle">
+                  Minimum model confidence required to persist novel structured memories extracted by MiniMax M3.1 Flash.
+                </span>
+              </div>
+              <div className="cooldown-pill-group">
+                {[
+                  { label: '0.70 Balanced', val: 0.70 },
+                  { label: '0.75 Recommended', val: 0.75 },
+                  { label: '0.90 Strict', val: 0.90 }
+                ].map((item) => (
+                  <button
+                    key={item.val}
+                    type="button"
+                    className={`cooldown-pill-btn ${Math.abs(confidenceThreshold - item.val) < 0.01 ? 'is-active' : ''}`}
+                    onClick={() => handleSelectConfidenceThreshold(item.val)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Sub-Panel: Reusable Orange Skills (Stage 5E) */}
+          <div className="skills-subpanel">
+            <div className="skills-subpanel-header">
+              <div className="skills-subpanel-title-group">
+                <Zap size={16} className="text-orange" />
+                <span className="skills-subpanel-title">Reusable Orange Skills</span>
+                {skillsStatusMsg && (
+                  <span className="section-status-pill">{skillsStatusMsg}</span>
+                )}
+              </div>
+              <button
+                type="button"
+                className="btn-save-endpoint"
+                onClick={() => setShowNewSkillForm(!showNewSkillForm)}
+              >
+                <Plus size={13} />
+                <span>{showNewSkillForm ? 'Close Form' : '+ New Skill'}</span>
+              </button>
+            </div>
+
+            {showNewSkillForm && (
+              <form className="new-skill-form" onSubmit={handleCreateNewSkill}>
+                <div className="form-grid-row">
+                  <div className="form-field-group">
+                    <label className="form-field-label">Skill Name</label>
+                    <input
+                      type="text"
+                      className="form-field-input"
+                      placeholder="e.g. Workspace Quick Check"
+                      value={newSkillName}
+                      onChange={(e) => {
+                        setNewSkillName(e.target.value);
+                        if (!newSkillSlug) {
+                          setNewSkillSlug(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '-'));
+                        }
+                      }}
+                    />
+                  </div>
+                  <div className="form-field-group">
+                    <label className="form-field-label">Command Slug</label>
+                    <input
+                      type="text"
+                      className="form-field-input"
+                      placeholder="e.g. workspace-quick-check"
+                      value={newSkillSlug}
+                      onChange={(e) => setNewSkillSlug(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div className="form-field-group">
+                  <label className="form-field-label">Description</label>
+                  <input
+                    type="text"
+                    className="form-field-input"
+                    placeholder="Short description of what this routine does"
+                    value={newSkillDesc}
+                    onChange={(e) => setNewSkillDesc(e.target.value)}
+                  />
+                </div>
+                <div className="form-grid-row">
+                  <div className="form-field-group">
+                    <label className="form-field-label">Command / Step</label>
+                    <input
+                      type="text"
+                      className="form-field-input"
+                      placeholder="e.g. git status --short"
+                      value={newSkillCommand}
+                      onChange={(e) => setNewSkillCommand(e.target.value)}
+                    />
+                  </div>
+                  <div className="form-field-group">
+                    <label className="form-field-label">Prompt Template</label>
+                    <input
+                      type="text"
+                      className="form-field-input"
+                      placeholder="e.g. Summarize status for: {{input}}"
+                      value={newSkillTemplate}
+                      onChange={(e) => setNewSkillTemplate(e.target.value)}
+                    />
+                  </div>
+                </div>
+                {newSkillError && (
+                  <div className="inline-error-text">
+                    <AlertTriangle size={13} />
+                    <span>{newSkillError}</span>
+                  </div>
+                )}
+                <div className="form-actions-row">
+                  <button
+                    type="button"
+                    className="btn-cancel-endpoint"
+                    onClick={() => setShowNewSkillForm(false)}
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" className="btn-save-endpoint">
+                    Create Skill
+                  </button>
+                </div>
+              </form>
+            )}
+
+            <div className="skills-list-container">
+              {skillsList.map((skill) => (
+                <div key={skill.slug} className="skill-card-item">
+                  <div className="skill-item-info">
+                    <div className="skill-item-header">
+                      <span className="skill-item-name">{skill.name || skill.slug}</span>
+                      <span className="skill-item-slug-pill">/skill {skill.slug}</span>
+                      <span className={`skill-risk-badge ${skill.risk_level === 'SAFE' ? 'is-safe' : 'is-altering'}`}>
+                        {skill.risk_level}
+                      </span>
+                      {skill.builtin && <span className="skill-item-meta">(built-in)</span>}
+                    </div>
+                    <span className="skill-item-desc">{skill.description}</span>
+                    <span className="skill-item-meta">{skill.step_count || skill.steps?.length || 1} step(s)</span>
+                  </div>
+                  <div className="skill-item-actions">
+                    <button
+                      type="button"
+                      className="btn-skill-run"
+                      onClick={() => handleRunSkill(skill.slug)}
+                      disabled={!skill.enabled || runningSkillSlug === skill.slug}
+                      title={`Run /skill ${skill.slug} now`}
+                    >
+                      {runningSkillSlug === skill.slug ? (
+                        <>
+                          <Loader2 size={12} className="animate-spin" />
+                          <span>Running...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Play size={12} />
+                          <span>Run Now</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      className={`switch-toggle-btn ${skill.enabled ? 'is-active' : ''}`}
+                      onClick={() => handleToggleSkill(skill.slug)}
+                      title={skill.enabled ? `Disable /skill ${skill.slug}` : `Enable /skill ${skill.slug}`}
+                    >
+                      <span className="toggle-slider" />
+                    </button>
+                    {!skill.builtin && (
+                      <button
+                        type="button"
+                        className="btn-skill-delete"
+                        onClick={() => handleDeleteSkill(skill.slug)}
+                        title={`Delete /skill ${skill.slug}`}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>

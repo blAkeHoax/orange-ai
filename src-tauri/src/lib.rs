@@ -3,7 +3,13 @@ pub mod job_object;
 pub mod python_runtime;
 pub mod single_instance;
 
-use tauri::Manager;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager,
+};
 
 pub fn run() {
     // 1. Enforce single-instance mutex
@@ -18,10 +24,84 @@ pub fn run() {
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .manage(commands::MinimizeToTrayState(AtomicBool::new(true)))
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // Build Tray Menu items
+            let open_item = MenuItem::with_id(app, "open", "Open Orange AI", true, None::<&str>)?;
+            let briefing_item = MenuItem::with_id(
+                app,
+                "briefing",
+                "Generate Morning Briefing",
+                true,
+                None::<&str>,
+            )?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit Orange AI", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&open_item, &briefing_item, &quit_item])?;
+
+            let mut tray_builder = TrayIconBuilder::new()
+                .menu(&tray_menu)
+                .tooltip("Orange AI — Autonomous Assistant")
+                .show_menu_on_left_click(false);
+
+            if let Some(icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
+            }
+
+            tray_builder
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "briefing" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                            let _ = window.emit("tray://trigger-briefing", ());
+                        }
+                    }
+                    "quit" => {
+                        let app_handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(supervisor) = app_handle
+                                .try_state::<Arc<python_runtime::RuntimeSupervisor>>()
+                            {
+                                if let Ok(runtime) = supervisor.get_runtime().await {
+                                    let _ = runtime
+                                        .call("system.shutdown", serde_json::json!({}))
+                                        .await;
+                                }
+                            }
+                            app_handle.exit(0);
+                        });
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
 
             // Spawn and supervise Python runtime without panicking on failure
             let supervisor = python_runtime::RuntimeSupervisor::new(handle);
@@ -34,6 +114,17 @@ pub fn run() {
 
             app.manage(supervisor);
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                if let Some(min_state) = app.try_state::<commands::MinimizeToTrayState>() {
+                    if min_state.0.load(Ordering::SeqCst) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_handshake_status,
@@ -55,7 +146,8 @@ pub fn run() {
             commands::set_window_size,
             commands::set_theme,
             commands::toggle_drawer,
-            commands::select_view
+            commands::select_view,
+            commands::set_minimize_to_tray
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

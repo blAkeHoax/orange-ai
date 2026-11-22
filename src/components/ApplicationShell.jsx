@@ -17,7 +17,8 @@ import {
   getLatestBriefing,
   getLatestReconciliations,
   getStructuredMemory,
-  startNewChatSession
+  startNewChatSession,
+  triggerBriefing
 } from '../services/tauriBridge';
 import '../styles/ApplicationShell.css';
 
@@ -288,6 +289,16 @@ export default function ApplicationShell() {
         if (payload?.view) setActiveView(payload.view);
       });
       unlisteners.push(uView);
+
+      // Listen for Tray trigger briefing event
+      const uTrayBriefing = await onEvent('tray://trigger-briefing', () => {
+        triggerBriefing({ force: true })
+          .then((res) => {
+            if (res?.briefing) setBriefingModal(res.briefing);
+          })
+          .catch((err) => console.warn('Failed to trigger briefing from tray:', err));
+      });
+      unlisteners.push(uTrayBriefing);
     }
 
     initRuntime();
@@ -427,11 +438,20 @@ export default function ApplicationShell() {
     };
   }, [activeView, isDrawerOpen, notifications, briefingModal, activeAdvisory, userName]);
 
-  const handleSendMessage = async (text) => {
-    if (!text.trim() || isExecuting) return;
+  const handleSendMessage = async (text, attachments = []) => {
+    const rawText = (text || '').trim();
+    const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+    if ((!rawText && !hasAttachments) || isExecuting) return;
+
+    const promptText = rawText || "Analyze the attached file(s).";
 
     // Add user message
-    const userMsg = { role: 'user', text, timestamp: Date.now() };
+    const userMsg = {
+      role: 'user',
+      text: promptText,
+      attachments: hasAttachments ? attachments : [],
+      timestamp: Date.now()
+    };
     setMessages((prev) => [...prev, userMsg]);
     setIsExecuting(true);
 
@@ -439,7 +459,7 @@ export default function ApplicationShell() {
     setActiveView('chat');
 
     try {
-      const result = await sendMessage(text);
+      const result = await sendMessage(promptText, hasAttachments ? attachments : []);
       let replyText = result?.reply || result?.response || 'I am ready to assist.';
       
       // Clean up any embedded advisory markdown text block

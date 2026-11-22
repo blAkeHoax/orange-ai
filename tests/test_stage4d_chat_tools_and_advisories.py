@@ -73,6 +73,8 @@ class TestStage4DChatToolsAndAdvisories(unittest.TestCase):
         call_count = 0
         def mock_assist(*args, **kwargs):
             nonlocal call_count
+            if kwargs.get("task_type") == "structured_output":
+                return {"memories": [], "conversational_state": {}}
             res = mock_assist_calls[min(call_count, len(mock_assist_calls) - 1)]
             call_count += 1
             return res

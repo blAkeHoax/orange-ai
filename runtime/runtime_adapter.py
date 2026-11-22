@@ -99,7 +99,7 @@ import tools.system as tool_sys
 from brain import scheduler
 
 # Version & Protocol Specification
-ORANGE_AI_VERSION = "2.0.0"
+ORANGE_AI_VERSION = "2.1.0"
 ORANGE_AI_PROTOCOL_VERSION = "1.0"
 
 # Persistent GUI settings helper & Stage 2B Model/Proactive Configuration
@@ -174,6 +174,12 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "idle_threshold_minutes": 10,
     "reminder_lead_times": {},
     "chat_session_start_id": 0,
+    "hybrid_memory_extraction_enabled": True,
+    "hybrid_memory_confidence_threshold": 0.75,
+    "adaptive_empathy_enabled": True,
+    "minimize_to_tray_enabled": True,
+    "desktop_toasts_enabled": True,
+    "full_access_mode": "supervised",
 }
 
 _BRIEFING_TIME_REGEX = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -264,6 +270,9 @@ def _is_within_quiet_hours(settings: Dict[str, Any], now_dt: Optional[datetime] 
 
 def _load_gui_settings() -> Dict[str, Any]:
     path = os.path.join(get_user_data_dir(), "gui_settings.json")
+    alt_path = os.path.join(get_user_data_dir(), "settings.json")
+    if not os.path.exists(path) and os.path.exists(alt_path):
+        path = alt_path
     settings = dict(DEFAULT_SETTINGS)
     if not os.path.exists(path):
         return settings
@@ -308,6 +317,22 @@ def _load_gui_settings() -> Dict[str, Any]:
                     settings["reminder_lead_times"] = data["reminder_lead_times"]
                 if isinstance(data.get("chat_session_start_id"), (int, float)):
                     settings["chat_session_start_id"] = int(data["chat_session_start_id"])
+                if isinstance(data.get("hybrid_memory_extraction_enabled"), bool):
+                    settings["hybrid_memory_extraction_enabled"] = data["hybrid_memory_extraction_enabled"]
+                if isinstance(data.get("adaptive_empathy_enabled"), bool):
+                    settings["adaptive_empathy_enabled"] = data["adaptive_empathy_enabled"]
+                if "hybrid_memory_confidence_threshold" in data:
+                    try:
+                        thresh = float(data["hybrid_memory_confidence_threshold"])
+                        settings["hybrid_memory_confidence_threshold"] = max(0.5, min(1.0, thresh))
+                    except (ValueError, TypeError):
+                        pass
+                if isinstance(data.get("minimize_to_tray_enabled"), bool):
+                    settings["minimize_to_tray_enabled"] = data["minimize_to_tray_enabled"]
+                if isinstance(data.get("desktop_toasts_enabled"), bool):
+                    settings["desktop_toasts_enabled"] = data["desktop_toasts_enabled"]
+                if data.get("full_access_mode") in ("supervised", "unrestricted"):
+                    settings["full_access_mode"] = data["full_access_mode"]
                 # Preserve any extra legacy keys (excluding model to prevent obsolete overwrite)
                 for k, v in data.items():
                     if k not in settings and k != "model":
@@ -545,6 +570,8 @@ def _apply_runtime_settings(settings: Dict[str, Any]):
 _START_TIME = time.time()
 _protocol_lock = threading.Lock()
 _is_shutting_down = False
+_session_conversational_state: Optional[Dict[str, Any]] = None
+_session_tool_chains: List[Tuple[str, ...]] = []
 _pending_confirmations: Dict[str, Dict[str, Any]] = {}
 _recommendation_actions: Dict[str, Dict[str, Any]] = {}
 
@@ -1813,10 +1840,12 @@ def _init_stage2c_background_workers():
     )
     _stage2c_worker_thread.start()
     logger.info("[STAGE-2C] Proactive intelligence background workers initialized.")
+    init_scheduler_heartbeat()
 
 
 def _stop_stage2c_background_workers(timeout: float = 3.0):
     """Signal background workers to stop and wait for clean termination."""
+    stop_scheduler_heartbeat(timeout=0.05)
     _stage2c_stop_event.set()
     if _stage2c_worker_thread and _stage2c_worker_thread.is_alive():
         _stage2c_worker_thread.join(timeout=timeout)
@@ -1837,6 +1866,332 @@ def _stop_stage2c_background_workers(timeout: float = 3.0):
                 f"Stage 2C briefing worker thread still alive after {timeout}s timeout"
             )
     logger.info("[STAGE-2C] Proactive intelligence background workers stopped.")
+
+
+# --- Scope E: Stage 5C 30-Second Background Scheduler Heartbeat & Quiet-Hours Gate ---
+
+_scheduler_stop_event = threading.Event()
+_scheduler_heartbeat_thread: Optional[threading.Thread] = None
+_workspace_failure_history: List[Dict[str, Any]] = []
+_last_health_check_ts: float = 0.0
+
+
+def record_workspace_failure(workspace_name_or_path: str, error_detail: str = ""):
+    """Track recent failed job/command runs; emit watcher_alert if 3+ failures occur within 10 minutes."""
+    global _workspace_failure_history
+    now_ts = time.time()
+    ws_key = Path(str(workspace_name_or_path)).name if workspace_name_or_path else "workspace"
+    _workspace_failure_history.append({
+        "workspace": ws_key,
+        "timestamp": now_ts,
+        "error": str(error_detail),
+    })
+    # Prune failures older than 10 minutes (600s)
+    cutoff = now_ts - 600.0
+    _workspace_failure_history = [f for f in _workspace_failure_history if f["timestamp"] >= cutoff]
+
+    recent = [f for f in _workspace_failure_history if f["workspace"] == ws_key]
+    if len(recent) >= 3:
+        alert_evt_id = f"evt_friction_{ws_key}_{int(now_ts // 600)}"
+        settings = _load_gui_settings()
+        in_quiet = _is_within_quiet_hours(settings, datetime.now())
+        suppress_toast = (not settings.get("desktop_toasts_enabled", True)) or in_quiet
+        emit_proactive_event(
+            event_type="watcher_alert",
+            entity_id=ws_key,
+            event_id=alert_evt_id,
+            payload={
+                "alert_type": "friction_loop",
+                "workspace": ws_key,
+                "message": f"Repeated build/test failures detected in {ws_key} ({len(recent)} failures within 10 minutes).",
+                "failure_count": len(recent),
+                "suppress_toast": suppress_toast,
+            }
+        )
+        logger.warning("[WATCHER] Friction alert emitted for workspace '%s': %d failures in 10m", ws_key, len(recent))
+
+
+def scan_workspace_watchers() -> Dict[str, Dict[str, Any]]:
+    """
+    Scan local git activity across D:\\Orange AI\\* and D:\\CreatorPulse.
+    Safe on missing, uninitialized, or non-git paths.
+    """
+    target_workspaces = [
+        r"D:\Orange AI\Orange AI Tauri",
+        r"D:\Orange AI\Orange AI Desktop",
+        r"D:\Orange AI\Orange API",
+        r"D:\CreatorPulse",
+    ]
+
+    results: Dict[str, Dict[str, Any]] = {}
+    for ws_path in target_workspaces:
+        ws_name = Path(ws_path).name
+        if not os.path.exists(ws_path) or not os.path.isdir(ws_path):
+            continue
+        dot_git = os.path.join(ws_path, ".git")
+        if not os.path.exists(dot_git):
+            continue
+
+        try:
+            # 1. Current Branch
+            branch_proc = subprocess.run(
+                ["git", "-C", ws_path, "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            branch = branch_proc.stdout.strip() if branch_proc.returncode == 0 else "unknown"
+
+            # 2. Latest commit epoch and ISO string
+            ts_proc = subprocess.run(
+                ["git", "-C", ws_path, "log", "-1", "--format=%ct|%cI|%s"],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            if ts_proc.returncode == 0 and ts_proc.stdout.strip():
+                parts = ts_proc.stdout.strip().split("|", 2)
+                commit_epoch = int(parts[0]) if len(parts) >= 1 and parts[0].isdigit() else 0
+                commit_iso = parts[1] if len(parts) >= 2 else ""
+                commit_subj = parts[2] if len(parts) >= 3 else ""
+            else:
+                commit_epoch = 0
+                commit_iso = ""
+                commit_subj = ""
+
+            # 3. Uncommitted file count
+            stat_proc = subprocess.run(
+                ["git", "-C", ws_path, "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            uncommitted_count = len(stat_proc.stdout.strip().splitlines()) if stat_proc.stdout.strip() else 0
+
+            results[ws_name] = {
+                "name": ws_name,
+                "path": ws_path,
+                "branch": branch,
+                "latest_commit_epoch": commit_epoch,
+                "latest_commit_iso": commit_iso,
+                "latest_commit_subject": commit_subj,
+                "uncommitted_changes_count": uncommitted_count,
+            }
+        except Exception as e:
+            logger.warning("[WATCHER] Error scanning git workspace %s: %s", ws_path, e)
+            continue
+
+    return results
+
+
+def ensure_default_standing_jobs() -> List[Any]:
+    """
+    Idempotently seed default recurring Agent Jobs when jobs.list is empty on startup.
+    1. Daily Morning Briefing & Priority Digest
+    2. Workspace & Git Hygiene Audit
+    3. Overdue Reminder & Blocker Escalation
+    """
+    try:
+        main.ensure_initialized()
+        mgr = main.get_job_manager()
+        if not mgr:
+            return []
+        existing = mgr.list_jobs(limit=100)
+        existing_goals = {j.goal.strip().lower() for j in existing}
+
+        default_jobs = [
+            ("Daily Morning Briefing & Priority Digest", "standing,briefing"),
+            ("Workspace & Git Hygiene Audit", "standing,hygiene"),
+            ("Overdue Reminder & Blocker Escalation", "standing,reminders"),
+        ]
+
+        seeded = []
+        for goal, tags in default_jobs:
+            if goal.lower() not in existing_goals:
+                created = mgr.create(goal=goal, source="standing_job", tags=tags)
+                seeded.append(created)
+                logger.info("[STANDING-JOBS] Seeded default standing job: '%s' (ID: %s)", goal, created.id)
+        return seeded
+    except Exception as e:
+        logger.warning("[STANDING-JOBS] Failed to ensure default standing jobs: %s", e)
+        return []
+
+
+def run_scheduler_tick(now: Optional[datetime] = None) -> Dict[str, Any]:
+    """
+    Execute a single 30-second background scheduler heartbeat tick.
+    1. Evaluates due Morning Briefing according to user preferences and local time (deduplicated per day).
+    2. Checks overdue reminders in memory.db and enqueues reminder_due proactive events (deduplicated per reminder ID).
+    3. Scans workspace git activity and friction failure loops.
+    4. Probes Render /health endpoint (throttled to once per 15 minutes), alerting only on failures.
+    5. Enforces an Interruptibility & Quiet-Hours Gate: if desktop_toasts_enabled is False or now falls
+       inside configured quiet hours, suppresses toast emission while updating internal state cleanly.
+    """
+    current_dt = now or datetime.now()
+    settings = _load_gui_settings()
+    global _last_health_check_ts
+
+    in_quiet = _is_within_quiet_hours(settings, current_dt)
+    desktop_toasts_enabled = settings.get("desktop_toasts_enabled", True)
+    suppress_toast = (not desktop_toasts_enabled) or in_quiet
+
+    # 1. Evaluate Morning Briefing
+    briefing_result = None
+    if settings.get("morning_briefing_enabled", False):
+        try:
+            briefing_result = _evaluate_morning_briefing(force=False, test_now=current_dt, sync=True)
+            if briefing_result and suppress_toast:
+                briefing_result["suppress_toast"] = True
+        except Exception as e:
+            logger.warning("[SCHEDULER] Morning briefing evaluation error: %s", e)
+
+    # 2. Check overdue reminders
+    reminders_emitted = []
+    try:
+        due_rems = scheduler.get_due_reminders(current_dt)
+        for r in due_rems:
+            rem_id = r.get("id")
+            evt_id = f"evt_reminder_{rem_id}"
+            already_emitted = False
+            with _get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT event_id FROM proactive_events WHERE event_id = ?", (evt_id,))
+                already_emitted = cur.fetchone() is not None
+
+            if not already_emitted:
+                payload = {
+                    "reminder_id": rem_id,
+                    "message": r.get("message", "Reminder due"),
+                    "due_at": r.get("due_at"),
+                    "suppress_toast": suppress_toast,
+                }
+                envelope = emit_proactive_event(
+                    event_type="reminder_due",
+                    entity_id=str(rem_id),
+                    payload=payload,
+                    event_id=evt_id,
+                )
+                if envelope:
+                    reminders_emitted.append(envelope)
+                logger.info(
+                    "[SCHEDULER] Emitted reminder_due for reminder #%s: %s (suppress_toast=%s)",
+                    rem_id,
+                    r.get("message"),
+                    suppress_toast,
+                )
+
+            # Atomic verification & marking fired in scheduler store
+            with _get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT event_id FROM proactive_events WHERE event_id = ?", (evt_id,))
+                persisted = cur.fetchone() is not None
+            if persisted:
+                scheduler.mark_fired(rem_id)
+    except Exception as e:
+        logger.warning("[SCHEDULER] Reminders check error: %s", e)
+
+    # 3. Workspace Watchers Git Activity
+    watchers_data = {}
+    try:
+        watchers_data = scan_workspace_watchers()
+    except Exception as e:
+        logger.warning("[SCHEDULER] Workspace watchers scan error: %s", e)
+
+    # 4. Render /health Watchdog Probe (Throttled to once every 15 minutes = 900s)
+    now_epoch = current_dt.timestamp()
+    health_checked = False
+    if (now_epoch - _last_health_check_ts) >= 900.0:
+        _last_health_check_ts = now_epoch
+        health_checked = True
+        api_url = settings.get("api_url", DEFAULT_API_URL)
+        try:
+            import requests
+            health_res = requests.get(f"{api_url.rstrip('/')}/health", timeout=5.0)
+            if health_res.status_code != 200:
+                logger.warning("[WATCHDOG] Orange API /health returned status %s", health_res.status_code)
+                emit_proactive_event(
+                    event_type="watcher_alert",
+                    entity_id="render_health",
+                    event_id=f"evt_health_{int(now_epoch // 900)}",
+                    payload={
+                        "alert_type": "render_health",
+                        "status": health_res.status_code,
+                        "message": f"Orange API health check failed (status {health_res.status_code})",
+                        "suppress_toast": suppress_toast,
+                    }
+                )
+        except Exception as e:
+            logger.warning("[WATCHDOG] Orange API /health probe error: %s", e)
+            emit_proactive_event(
+                event_type="watcher_alert",
+                entity_id="render_health",
+                event_id=f"evt_health_{int(now_epoch // 900)}",
+                payload={
+                    "alert_type": "render_health",
+                    "status": "error",
+                    "message": f"Orange API health check timed out or failed: {e}",
+                    "suppress_toast": suppress_toast,
+                }
+            )
+
+    return {
+        "tick_at": current_dt.isoformat(),
+        "quiet_hours": in_quiet,
+        "desktop_toasts_enabled": desktop_toasts_enabled,
+        "suppress_toast": suppress_toast,
+        "briefing_generated": briefing_result is not None,
+        "briefing": briefing_result,
+        "reminders_count": len(reminders_emitted),
+        "reminders_emitted": reminders_emitted,
+        "watchers": watchers_data,
+        "health_probe_executed": health_checked,
+    }
+
+
+def _scheduler_heartbeat_loop():
+    logger.info("[SCHEDULER] SchedulerHeartbeat thread started.")
+    while not _scheduler_stop_event.is_set():
+        if _scheduler_stop_event.wait(timeout=30.0):
+            break
+        try:
+            run_scheduler_tick()
+        except Exception as e:
+            logger.warning("[SCHEDULER] Error in scheduler heartbeat tick: %s", e)
+    logger.info("[SCHEDULER] SchedulerHeartbeat thread stopped.")
+
+
+def init_scheduler_heartbeat():
+    """Start the 30-second background SchedulerHeartbeat thread unless disabled by env."""
+    global _scheduler_heartbeat_thread
+    if os.environ.get("ORANGE_DISABLE_BACKGROUND_SCHEDULER") == "1":
+        logger.info("[SCHEDULER] Background scheduler disabled via ORANGE_DISABLE_BACKGROUND_SCHEDULER=1")
+        return
+    if _scheduler_heartbeat_thread and _scheduler_heartbeat_thread.is_alive():
+        return
+
+    # Seed default standing agent jobs if store is empty
+    ensure_default_standing_jobs()
+
+    _scheduler_stop_event.clear()
+    _scheduler_heartbeat_thread = threading.Thread(
+        target=_scheduler_heartbeat_loop,
+        daemon=True,
+        name="SchedulerHeartbeat",
+    )
+    _scheduler_heartbeat_thread.start()
+    logger.info("[SCHEDULER] SchedulerHeartbeat thread initialized.")
+
+
+def stop_scheduler_heartbeat(timeout: float = 0.05):
+    """Signal SchedulerHeartbeat thread to terminate and join within timeout (< 50ms)."""
+    global _scheduler_heartbeat_thread
+    _scheduler_stop_event.set()
+    if _scheduler_heartbeat_thread and _scheduler_heartbeat_thread.is_alive():
+        _scheduler_heartbeat_thread.join(timeout=timeout)
+        if _scheduler_heartbeat_thread.is_alive():
+            logger.warning("[SCHEDULER] SchedulerHeartbeat did not finish within %fs", timeout)
+        else:
+            _scheduler_heartbeat_thread = None
 
 
 # 6. JSON-RPC Method Handlers
@@ -2167,11 +2522,22 @@ TOOL_RISK_MAP: Dict[str, RiskLevel] = {
     "get_disk_usage": RiskLevel.SAFE,
     "get_battery": RiskLevel.SAFE,
     "todo_write": RiskLevel.SAFE,
+    "get_clipboard": RiskLevel.SAFE,
 
-    # CONFIRMATION_REQUIRED tools (state changes, file creation/edits, apps)
+    # CONFIRMATION_REQUIRED tools (state changes, file creation/edits, apps, shell)
     "create_file": RiskLevel.CONFIRMATION_REQUIRED,
     "write_file": RiskLevel.CONFIRMATION_REQUIRED,
     "make_file": RiskLevel.CONFIRMATION_REQUIRED,
+    "append_file": RiskLevel.CONFIRMATION_REQUIRED,
+    "delete_file": RiskLevel.CONFIRMATION_REQUIRED,
+    "remove_file": RiskLevel.CONFIRMATION_REQUIRED,
+    "rm": RiskLevel.CONFIRMATION_REQUIRED,
+    "del": RiskLevel.CONFIRMATION_REQUIRED,
+    "delete_directory": RiskLevel.CONFIRMATION_REQUIRED,
+    "rmdir": RiskLevel.CONFIRMATION_REQUIRED,
+    "remove_dir": RiskLevel.CONFIRMATION_REQUIRED,
+    "move_path": RiskLevel.CONFIRMATION_REQUIRED,
+    "create_directory": RiskLevel.CONFIRMATION_REQUIRED,
     "edit_file": RiskLevel.CONFIRMATION_REQUIRED,
     "modify_file": RiskLevel.CONFIRMATION_REQUIRED,
     "replace_in_file": RiskLevel.CONFIRMATION_REQUIRED,
@@ -2181,16 +2547,12 @@ TOOL_RISK_MAP: Dict[str, RiskLevel] = {
     "open_dir": RiskLevel.CONFIRMATION_REQUIRED,
     "close_process": RiskLevel.CONFIRMATION_REQUIRED,
     "kill_process": RiskLevel.CONFIRMATION_REQUIRED,
+    "manage_process": RiskLevel.CONFIRMATION_REQUIRED,
+    "set_clipboard": RiskLevel.CONFIRMATION_REQUIRED,
     "run_command": RiskLevel.CONFIRMATION_REQUIRED,
+    "run_powershell": RiskLevel.CONFIRMATION_REQUIRED,
 
-    # HIGH_RISK tools (Blocked unconditionally)
-    "delete_file": RiskLevel.HIGH_RISK,
-    "remove_file": RiskLevel.HIGH_RISK,
-    "rm": RiskLevel.HIGH_RISK,
-    "del": RiskLevel.HIGH_RISK,
-    "delete_directory": RiskLevel.HIGH_RISK,
-    "rmdir": RiskLevel.HIGH_RISK,
-    "remove_dir": RiskLevel.HIGH_RISK,
+    # HIGH_RISK / Catastrophic tools (Blocked unconditionally)
     "shutdown_system": RiskLevel.HIGH_RISK,
     "reboot_system": RiskLevel.HIGH_RISK,
     "format_disk": RiskLevel.HIGH_RISK,
@@ -2288,6 +2650,33 @@ def extract_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]]]:
                     elif func_name in ("run_command", "exec_command"):
                         if "command" not in kwargs:
                             kwargs["command"] = pos_args[0]
+                    elif func_name in ("run_powershell", "powershell", "pwsh"):
+                        if "command" not in kwargs and len(pos_args) >= 1:
+                            kwargs["command"] = pos_args[0]
+                    elif func_name in ("append_file",):
+                        if "path" not in kwargs and len(pos_args) >= 1:
+                            kwargs["path"] = pos_args[0]
+                        if "content" not in kwargs and len(pos_args) >= 2:
+                            kwargs["content"] = pos_args[1]
+                    elif func_name in ("delete_file", "remove_file", "delete_directory"):
+                        if "path" not in kwargs and len(pos_args) >= 1:
+                            kwargs["path"] = pos_args[0]
+                    elif func_name in ("move_path", "rename_file"):
+                        if "src" not in kwargs and len(pos_args) >= 1:
+                            kwargs["src"] = pos_args[0]
+                        if "dst" not in kwargs and len(pos_args) >= 2:
+                            kwargs["dst"] = pos_args[1]
+                    elif func_name in ("create_directory", "mkdir"):
+                        if "path" not in kwargs and len(pos_args) >= 1:
+                            kwargs["path"] = pos_args[0]
+                    elif func_name in ("set_clipboard",):
+                        if "text" not in kwargs and len(pos_args) >= 1:
+                            kwargs["text"] = pos_args[0]
+                    elif func_name in ("manage_process",):
+                        if "action" not in kwargs and len(pos_args) >= 1:
+                            kwargs["action"] = pos_args[0]
+                        if "name_or_pid" not in kwargs and len(pos_args) >= 2:
+                            kwargs["name_or_pid"] = pos_args[1]
                 return func_name, kwargs
             except Exception:
                 # Fallback: regex for key="value" or key='value'
@@ -2331,10 +2720,17 @@ def _synthesize_safe_tool_response(
             history=[],
             system_instruction="You are Orange AI. You just executed a local desktop tool to answer the user's request. Present the results clearly, concisely, and naturally. Never output pseudo-code or tool call syntax.",
         )
-        if synth_result and synth_result.get("reply"):
-            candidate = synth_result["reply"].strip()
+        if synth_result:
+            if isinstance(synth_result, dict):
+                synth_text = synth_result.get("reply", "")
+            elif isinstance(synth_result, str):
+                synth_text = synth_result
+            else:
+                synth_text = ""
+
+            candidate = synth_text.strip()
             # If candidate does not contain raw pseudo-tool call, use it
-            if not extract_tool_call(candidate):
+            if candidate and not extract_tool_call(candidate):
                 synth_reply = candidate
     except Exception as e:
         logger.warning("[CHAT-TOOL] LLM synthesis error or timeout: %s; falling back to deterministic formatting.", e)
@@ -2355,8 +2751,44 @@ def _synthesize_safe_tool_response(
     elif tool_name in ("find_folder", "search_folder"):
         folder = tool_kwargs.get("folder_name", "")
         return f"Search results for folder '{folder}':\n\n{tool_output}"
+    elif tool_name in ("create_file", "write_file", "make_file"):
+        target_path = tool_kwargs.get("path", "")
+        return f"File '{target_path}' created successfully.\n\n{tool_output}"
     else:
         return f"{tool_output}"
+
+
+def _synthesize_skill_response(
+    slug: str,
+    input_text: str,
+    raw_output: str,
+    step_results: List[Dict[str, Any]],
+    api_client: Optional[OrangeAPIClient] = None,
+) -> str:
+    """
+    Synthesize a natural language skill response via OrangeAPIClient with fallback.
+    Never returns raw tool call pseudo-code.
+    """
+    client = api_client or getattr(main, "api_client", None) or OrangeAPIClient()
+    if client and hasattr(client, "is_available") and client.is_available():
+        try:
+            synth_res = client.assist(
+                message=(
+                    f"The user invoked Orange Skill '/skill {slug}' with input: '{input_text}'.\n\n"
+                    f"The skill executed locally and returned the following outputs:\n{raw_output}\n\n"
+                    f"Please provide a clear, concise, and structured summary for the user based strictly on the outputs above."
+                ),
+                history=[],
+                system_instruction="You are Orange AI. You just executed an Orange Skill routine. Present the results clearly, concisely, and naturally.",
+            )
+            if synth_res:
+                if isinstance(synth_res, dict) and synth_res.get("reply"):
+                    return synth_res["reply"].strip()
+                elif isinstance(synth_res, str) and synth_res.strip():
+                    return synth_res.strip()
+        except Exception as e:
+            logger.debug("Skill synthesis failed, falling back to raw output: %s", e)
+    return raw_output
 
 
 def process_user_turn(
@@ -2384,8 +2816,11 @@ def process_user_turn(
     direct_tool_call = extract_tool_call(text)
 
     # 2. If not a direct tool call, let main.process_user_turn process initial turn
+    global _session_conversational_state
     if not direct_tool_call:
         outcome = main.process_user_turn(text, prompt_fn=prompt_fn)
+        if "conversational_state" in outcome:
+            _session_conversational_state = outcome["conversational_state"]
         reply_tool_call = extract_tool_call(outcome.get("reply", ""))
         if not reply_tool_call:
             # Ordinary conversational turn: clean any embedded advisory markdown and do not attach duplicate recommendation card
@@ -2395,6 +2830,16 @@ def process_user_turn(
                 outcome["reply"] = clean_reply
             if "recommendation" in outcome:
                 outcome.pop("recommendation", None)
+
+            # Synthesize skill response if turn invoked an Orange Skill
+            if outcome.get("skill_used") and outcome.get("type") == "skill":
+                clean_reply = _synthesize_skill_response(
+                    outcome["skill_used"],
+                    text,
+                    clean_reply,
+                    outcome.get("tool_steps", []),
+                )
+                outcome["reply"] = clean_reply
 
             # Ensure the turn is recorded in conversation_history if not already recorded
             try:
@@ -2426,305 +2871,292 @@ def process_user_turn(
         outcome = {"learned": [], "retired": []}
         tool_call_to_run = direct_tool_call
 
-    # 3. We have a tool call to run! Evaluate risk level
-    tool_name, tool_kwargs = tool_call_to_run
-    risk_level = get_tool_risk(tool_name)
-    learned = outcome.get("learned", [])
-    retired = outcome.get("retired", [])
+    # 3. We have a tool call to run! Execute via Bounded Multi-Step Goal Loop (up to 8 steps)
+    MAX_GOAL_STEPS = 8
+    tool_steps: List[Dict[str, Any]] = []
+    current_call = tool_call_to_run
+    final_reply = ""
+    last_tool_result = None
+    settings = _load_gui_settings()
+    full_access_mode = settings.get("full_access_mode", "supervised")
 
-    # Case A: HIGH_RISK -> Block unconditionally
-    if risk_level == RiskLevel.HIGH_RISK:
-        explanation = (
-            f"⚠️ Safety Guardrail: Action '{tool_name}' is classified as HIGH_RISK "
-            f"and cannot be executed automatically."
-        )
-        return {
-            "reply": explanation,
-            "model": "guardrails",
-            "type": "error",
-            "status": "blocked",
-            "learned": learned,
-            "retired": retired,
-        }
-
-    # Case B: CONFIRMATION_REQUIRED -> Gate behind confirmation
-    if risk_level == RiskLevel.CONFIRMATION_REQUIRED:
+    for step_idx in range(1, MAX_GOAL_STEPS + 1):
+        tool_name, tool_kwargs = current_call
+        risk_level = get_tool_risk(tool_name)
         target_desc = (
             tool_kwargs.get("path")
             or tool_kwargs.get("app_name")
             or tool_kwargs.get("process_name")
             or tool_kwargs.get("command")
+            or tool_kwargs.get("src")
+            or tool_kwargs.get("target")
             or "target"
         )
 
-        job_mgr = main.get_job_manager() if hasattr(main, "get_job_manager") else None
-        job_id = None
-        if job_mgr:
-            try:
-                job = job_mgr.create(goal=f"Execute {tool_name} on {target_desc}")
-                job_id = job.id
-                job_mgr.store.set_status(job_id, JobStatus.WAITING_CONFIRMATION)
-                job.status = JobStatus.WAITING_CONFIRMATION
-            except Exception as e:
-                logger.warning("[CHAT-GUARDRAIL] Could not record job in JobManager: %s", e)
-
-        # Build user confirmation prompt
-        if tool_name in ("create_file", "write_file", "make_file"):
-            prompt_text = f"Orange AI requests confirmation to create file: '{tool_kwargs.get('path', '')}'. Proceed? [y/N]: "
-        elif tool_name in ("edit_file", "modify_file", "replace_in_file"):
-            prompt_text = f"Orange AI requests confirmation to edit file: '{tool_kwargs.get('path', '')}'. Proceed? [y/N]: "
-        elif tool_name in ("open_folder", "open_dir"):
-            prompt_text = f"Orange AI requests confirmation to open folder: '{tool_kwargs.get('path', '')}'. Proceed? [y/N]: "
-        elif tool_name in ("open_app", "launch_app"):
-            prompt_text = f"Orange AI requests confirmation to launch application: '{tool_kwargs.get('app_name', '')}'. Proceed? [y/N]: "
-        elif tool_name in ("close_process", "kill_process"):
-            prompt_text = f"Orange AI requests confirmation to close process: '{tool_kwargs.get('process_name', '')}'. Proceed? [y/N]: "
-        else:
-            prompt_text = f"Orange AI requests confirmation to execute '{tool_name}' ({target_desc}). Proceed? [y/N]: "
-
-        decision = "no"
-        if prompt_fn:
-            try:
-                decision = prompt_fn(prompt_text)
-            except Exception as e:
-                logger.error("[CHAT-GUARDRAIL] Confirmation prompt failed: %s", e)
-                decision = "no"
-
-        is_approved = str(decision).strip().lower() in ("yes", "y", "true", "1")
-        if not is_approved:
-            if job_mgr and job_id:
-                try:
-                    job_mgr.store.set_status(job_id, JobStatus.CANCELLED, final_response=f"Action '{tool_name}' rejected by user.")
-                except Exception:
-                    pass
+        # A. Catastrophic Command Guard
+        is_cat, cat_reason = tool_perm.is_catastrophic_command(f"{tool_name} {target_desc}")
+        if is_cat or risk_level == RiskLevel.HIGH_RISK:
+            explanation = f"⚠️ Safety Guardrail (HIGH_RISK): {cat_reason or f'Action {tool_name} is classified as HIGH_RISK and cannot be executed automatically.'}"
+            step_record = {
+                "step": step_idx,
+                "tool": tool_name,
+                "arguments": tool_kwargs,
+                "status": "BLOCKED",
+                "error": explanation,
+                "success": False,
+            }
+            tool_steps.append(step_record)
             return {
-                "reply": f"❌ Action '{tool_name}' was not authorized. Operation cancelled with zero changes made.",
+                "reply": explanation,
                 "model": "guardrails",
-                "type": "assistant",
-                "status": "cancelled",
-                "learned": learned,
-                "retired": retired,
+                "type": "error",
+                "status": "blocked",
+                "tool_steps": tool_steps,
+                "learned": outcome.get("learned", []),
+                "retired": outcome.get("retired", []),
+                "conversational_state": _session_conversational_state,
             }
 
-        # User approved: execute action safely
+        # B. Permission & Confirmation Evaluation
+        needs_confirmation = False
+        if full_access_mode == "unrestricted":
+            needs_confirmation = False
+        else: # "supervised"
+            if risk_level == RiskLevel.SAFE:
+                needs_confirmation = False
+            elif tool_name in (
+                "list_directory", "list_files", "list_dir", "dir", "read_file", "view_file",
+                "cat", "find_file", "find_folder", "get_clipboard", "get_time", "get_date",
+                "get_cpu_usage", "get_ram_usage", "get_disk_usage", "get_battery", "todo_write"
+            ):
+                needs_confirmation = False
+            elif tool_name in (
+                "create_file", "edit_file", "delete_file", "remove_file", "delete_directory",
+                "open_app", "launch_app", "close_process", "kill_process", "open_folder"
+            ):
+                needs_confirmation = True
+            elif tool_perm.is_scoped_in_workspaces(target_desc):
+                needs_confirmation = False
+            else:
+                needs_confirmation = True
+
+        if needs_confirmation:
+            if tool_name in ("create_file", "write_file", "make_file"):
+                prompt_text = f"Orange AI requests confirmation to create file: '{tool_kwargs.get('path', '')}'. Proceed? [y/N]: "
+            elif tool_name in ("edit_file", "modify_file", "replace_in_file"):
+                prompt_text = f"Orange AI requests confirmation to edit file: '{tool_kwargs.get('path', '')}'. Proceed? [y/N]: "
+            elif tool_name in ("delete_file", "remove_file", "delete_directory"):
+                prompt_text = f"Orange AI requests confirmation to delete: '{tool_kwargs.get('path', '')}'. Proceed? [y/N]: "
+            elif tool_name in ("open_folder", "open_dir"):
+                prompt_text = f"Orange AI requests confirmation to open folder: '{tool_kwargs.get('path', '')}'. Proceed? [y/N]: "
+            elif tool_name in ("open_app", "launch_app"):
+                prompt_text = f"Orange AI requests confirmation to launch application: '{tool_kwargs.get('app_name', target_desc)}'. Proceed? [y/N]: "
+            elif tool_name in ("close_process", "kill_process"):
+                prompt_text = f"Orange AI requests confirmation to close process: '{tool_kwargs.get('process_name', target_desc)}'. Proceed? [y/N]: "
+            else:
+                prompt_text = f"Orange AI requests confirmation to execute '{tool_name}' ({target_desc}). Proceed? [y/N]: "
+
+            decision = "no"
+            if prompt_fn:
+                try:
+                    decision = prompt_fn(prompt_text)
+                except Exception as e:
+                    logger.error("[CHAT-GUARDRAIL] Confirmation prompt failed: %s", e)
+                    decision = "no"
+
+            is_approved = str(decision).strip().lower() in ("yes", "y", "true", "1")
+            if not is_approved:
+                step_record = {
+                    "step": step_idx,
+                    "tool": tool_name,
+                    "arguments": tool_kwargs,
+                    "status": "CANCELLED",
+                    "error": "User declined confirmation",
+                    "success": False,
+                }
+                tool_steps.append(step_record)
+                return {
+                    "reply": f"❌ Action '{tool_name}' was not authorized. Operation cancelled with zero changes made.",
+                    "model": "guardrails",
+                    "type": "assistant",
+                    "status": "cancelled",
+                    "tool_steps": tool_steps,
+                    "learned": outcome.get("learned", []),
+                    "retired": outcome.get("retired", []),
+                }
+
+        # C. Act - Execute Tool
         exec_err = None
         exec_result = None
         try:
-            if tool_name in ("create_file", "write_file", "make_file"):
-                fpath = tool_kwargs.get("path", "")
-                fcontent = tool_kwargs.get("content", "")
-                p_obj = Path(fpath)
-                if p_obj.parent:
-                    p_obj.parent.mkdir(parents=True, exist_ok=True)
-                with open(p_obj, "w", encoding="utf-8") as f:
-                    f.write(fcontent)
-                exec_result = f"File '{fpath}' created successfully."
-            elif tool_name in ("edit_file", "modify_file", "replace_in_file"):
-                from tools.files import edit_file, get_approved_roots
-                exec_result = edit_file(
-                    path=tool_kwargs.get("path", ""),
-                    old_string=tool_kwargs.get("old_string", ""),
-                    new_string=tool_kwargs.get("new_string", ""),
-                    allowed_roots=get_approved_roots(),
-                )
-            elif tool_name in ("open_folder", "open_dir"):
-                from tools.apps import open_folder
-                exec_result = open_folder(tool_kwargs.get("path", ""))
-            elif tool_name in ("open_app", "launch_app"):
-                from tools.apps import open_app
-                exec_result = open_app(tool_kwargs.get("app_name", ""))
-            elif tool_name in ("close_process", "kill_process"):
-                from tools.processes import close_process
-                exec_result = close_process(tool_kwargs.get("process_name", ""))
-            else:
-                from tools.registry import registry
-                exec_result = registry.execute(tool_name, **tool_kwargs, prompt_fn=lambda _: "yes")
+            from tools.registry import registry
+            lookup_name = tool_name
+            if tool_name in ("create_file", "make_file"):
+                lookup_name = "write_file"
+            elif tool_name in ("modify_file", "replace_in_file"):
+                lookup_name = "edit_file"
+            elif tool_name in ("remove_file", "delete_directory"):
+                lookup_name = "delete_file"
+
+            exec_result = registry.execute(
+                lookup_name,
+                is_admin=tool_sys.is_running_as_admin(),
+                full_access_mode=full_access_mode,
+                prompt_fn=lambda _: "yes",
+                **tool_kwargs,
+            )
         except Exception as e:
             exec_err = str(e)
 
         if exec_err:
-            if job_mgr and job_id:
-                try:
-                    job_mgr.store.set_status(job_id, JobStatus.FAILED, last_error=exec_err)
-                except Exception:
-                    pass
-            return {
-                "reply": f"⚠️ Error executing '{tool_name}': {exec_err}",
-                "model": "tool",
-                "type": "error",
-                "learned": learned,
-                "retired": retired,
-            }
-
-        if job_mgr and job_id:
-            try:
-                job_mgr.store.set_status(job_id, JobStatus.COMPLETED, final_response=str(exec_result))
-            except Exception:
-                pass
-
-        exec_str = str(exec_result) if exec_result is not None else ""
-        return {
-            "reply": f"✅ Authorized and executed: {exec_result}",
-            "model": "tool",
-            "type": "assistant",
-            "status": "completed",
-            "tool_result": {
+            record_workspace_failure(target_desc, exec_err)
+            step_record = {
+                "step": step_idx,
                 "tool": tool_name,
-                "toolName": tool_name,
-                "status": "SUCCESS",
-                "stdout": exec_str[:2000],
-                "output": exec_str[:2000],
-                "content": exec_str[:2000],
-                "result": exec_str[:2000],
-                "commandArg": str(target_desc),
-                "parameters": tool_kwargs,
-            },
-            "learned": learned,
-            "retired": retired,
-        }
-
-    # Case C: SAFE (Read-Only) -> Execute locally and synthesize
-    tool_output = None
-    exec_err = None
-    try:
-        if tool_name in ("list_directory", "list_files", "list_dir", "dir"):
-            from tools.files import list_files
-            target_path = tool_kwargs.get("path", ".")
-            tool_output = list_files(path=target_path)
-        elif tool_name in ("read_file", "view_file", "cat"):
-            from tools.files import read_file, get_approved_roots
-            target_path = tool_kwargs.get("path", "")
-            start_l = int(tool_kwargs.get("start_line", 1))
-            max_l = int(tool_kwargs.get("max_lines", 500))
-            tool_output = read_file(path=target_path, start_line=start_l, max_lines=max_l, allowed_roots=get_approved_roots())
-        elif tool_name in ("find_file", "search_file"):
-            from tools.files import find_file, DEFAULT_SEARCH_PATH
-            tool_output = find_file(tool_kwargs.get("filename", ""), search_path=tool_kwargs.get("search_path", DEFAULT_SEARCH_PATH))
-        elif tool_name in ("find_folder", "search_folder"):
-            from tools.files import find_folder
-            tool_output = find_folder(tool_kwargs.get("folder_name", ""))
-        elif tool_name in ("list_processes", "ps"):
-            from tools.processes import list_processes
-            tool_output = list_processes()
-        elif tool_name in ("is_running",):
-            from tools.processes import is_running
-            tool_output = is_running(tool_kwargs.get("process_name", ""))
-        elif tool_name == "get_time":
-            from tools.system import get_time
-            tool_output = get_time()
-        elif tool_name == "get_date":
-            from tools.system import get_date
-            tool_output = get_date()
-        elif tool_name == "get_cpu_usage":
-            from tools.system import get_cpu_usage
-            tool_output = get_cpu_usage()
-        elif tool_name == "get_ram_usage":
-            from tools.system import get_ram_usage
-            tool_output = get_ram_usage()
-        elif tool_name == "get_disk_usage":
-            from tools.system import get_disk_usage
-            tool_output = get_disk_usage()
-        elif tool_name == "get_battery":
-            from tools.system import get_battery
-            tool_output = get_battery()
-        else:
-            from tools.registry import registry
-            tool_output = registry.execute(tool_name, **tool_kwargs)
-    except Exception as e:
-        exec_err = str(e)
-
-    if exec_err:
-        cmd_arg = str(
-            tool_kwargs.get("path")
-            or tool_kwargs.get("filename")
-            or tool_kwargs.get("folder_name")
-            or tool_kwargs.get("process_name")
-            or tool_kwargs.get("command")
-            or ""
-        )
-        return {
-            "reply": f"Error running '{tool_name}': {exec_err}",
-            "model": "tool",
-            "type": "error",
-            "tool_result": {
-                "tool": tool_name,
-                "toolName": tool_name,
+                "arguments": tool_kwargs,
                 "status": "FAILED",
-                "stdout": "",
-                "output": "",
-                "error": str(exec_err),
-                "commandArg": cmd_arg,
-                "parameters": tool_kwargs,
-            },
-            "learned": learned,
-            "retired": retired,
-        }
-
-    # Grounded synthesis via OrangeAPIClient (with deterministic fallback)
-    final_reply = _synthesize_safe_tool_response(
-        tool_name=tool_name,
-        tool_kwargs=tool_kwargs,
-        tool_output=tool_output,
-        user_input=text,
-    )
-
-    # Clean any advisory contamination from final_reply
-    if "Orange AI Advisory" in final_reply:
-        final_reply = re.sub(r"\n+💡\s+\*\*Orange AI Advisory\*\*[\s\S]*$", "", final_reply).strip()
-
-    # Save/update conversation history so context is preserved with grounded answer
-    try:
-        conn = mem.get_connection()
-        cursor = conn.execute("SELECT id, role FROM conversation_history ORDER BY id DESC LIMIT 1")
-        row = cursor.fetchone()
-        if row and row[1] == "assistant":
-            conn.execute("UPDATE conversation_history SET content = ? WHERE id = ?", (final_reply, row[0]))
-            conn.commit()
+                "error": exec_err,
+                "success": False,
+            }
+            tool_steps.append(step_record)
+            step_output = f"Error: {exec_err}"
+            step_success = False
         else:
-            main.save_turn("user", text)
-            main.save_turn("assistant", final_reply)
-        if hasattr(main, "history") and main.history and main.history[-1].get("role") == "assistant":
-            main.history[-1]["content"] = final_reply
-    except Exception as e:
-        logger.warning("[CHAT-TOOL] Could not update turn in history: %s", e)
+            step_str = str(exec_result) if exec_result is not None else ""
+            step_success = not (step_str.lower().startswith("error") or "action blocked" in step_str.lower())
+            if not step_success:
+                record_workspace_failure(target_desc, step_str)
+            step_record = {
+                "step": step_idx,
+                "tool": tool_name,
+                "arguments": tool_kwargs,
+                "status": "SUCCESS" if step_success else "FAILED",
+                "output": step_str,
+                "success": step_success,
+            }
+            tool_steps.append(step_record)
+            step_output = step_str
 
-    tool_out_str = str(tool_output) if tool_output is not None else ""
-    truncated_out = tool_out_str[:2000]
-    cmd_arg = str(
-        tool_kwargs.get("path")
-        or tool_kwargs.get("filename")
-        or tool_kwargs.get("folder_name")
-        or tool_kwargs.get("process_name")
-        or tool_kwargs.get("command")
-        or ""
-    )
-
-    return {
-        "reply": final_reply,
-        "model": "api",
-        "type": "assistant",
-        "tool_result": {
+        last_tool_result = {
             "tool": tool_name,
             "toolName": tool_name,
-            "status": "SUCCESS",
-            "stdout": truncated_out,
-            "output": truncated_out,
-            "content": truncated_out,
-            "result": truncated_out,
-            "commandArg": cmd_arg,
+            "status": "SUCCESS" if step_success else "FAILED",
+            "stdout": str(step_output)[:2000],
+            "output": str(step_output)[:2000],
+            "content": str(step_output)[:2000],
+            "result": str(step_output)[:2000],
+            "commandArg": str(target_desc),
             "parameters": tool_kwargs,
-        },
-        "learned": learned,
-        "retired": retired,
+        }
+
+        # D. Observe, Recover & Verify via LLM Decision Query
+        if step_idx < MAX_GOAL_STEPS:
+            decision_prompt = (
+                f"User goal: {text}\n\n"
+                f"Step {step_idx} execution:\n"
+                f"Tool: {tool_name}\n"
+                f"Status: {'SUCCESS' if step_success else 'FAILED'}\n"
+                f"Output:\n{step_output}\n\n"
+                f"Are all tasks for this goal complete? If yes, provide your final response to the user. "
+                f"If another step is needed or error recovery is required, respond ONLY with a JSON object: "
+                f'{{"tool": "<name>", "arguments": {{...}}}}'
+            )
+            try:
+                client = getattr(main, "api_client", None) or (_api_client if "_api_client" in globals() and _api_client else None) or OrangeAPIClient()
+                resp = client.assist(
+                    message=decision_prompt,
+                    system_instruction="You are Orange AI's autonomous execution planner. Determine if more steps are needed or if the goal is complete. If another step or recovery is needed, output JSON tool call. Otherwise output the final response.",
+                    task_type="agent_decision",
+                )
+                if isinstance(resp, dict):
+                    cand = (resp.get("reply") or "").strip()
+                elif isinstance(resp, str):
+                    cand = resp.strip()
+                else:
+                    cand = ""
+                next_call = extract_tool_call(cand)
+                if next_call:
+                    if next_call == current_call and step_success:
+                        final_reply = _synthesize_safe_tool_response(tool_name, tool_kwargs, step_output, text)
+                        break
+                    current_call = next_call
+                    continue
+                else:
+                    final_reply = cand
+                    break
+            except Exception as e:
+                logger.warning("[GOAL-LOOP] Decision assistance query failed: %s", e)
+                final_reply = _synthesize_safe_tool_response(tool_name, tool_kwargs, step_output, text)
+                break
+        else:
+            final_reply = f"Completed maximum goal steps ({MAX_GOAL_STEPS}). Final output:\n{step_output}"
+
+    if not final_reply and tool_steps:
+        final_reply = _synthesize_safe_tool_response(tool_steps[-1]["tool"], tool_steps[-1]["arguments"], tool_steps[-1].get("output", ""), text)
+
+    # Save to history
+    try:
+        main.save_turn("user", text)
+        main.save_turn("assistant", final_reply)
+    except Exception as e:
+        logger.warning("[CHAT-TURN] Error saving turn: %s", e)
+
+    ret_outcome = {
+        "reply": final_reply,
+        "model": "agent",
+        "type": "assistant",
+        "status": "completed" if (tool_steps and tool_steps[-1].get("success")) else "failed",
+        "tool_steps": tool_steps,
+        "tool_result": last_tool_result,
+        "learned": outcome.get("learned", []),
+        "retired": outcome.get("retired", []),
+        "conversational_state": _session_conversational_state,
     }
+
+    # REA Habit-to-Skill Suggestion (Stage 5E)
+    executed_tools = [s.get("tool") for s in tool_steps if s.get("status") in ("SUCCESS", "completed", "ALLOWED") and s.get("tool")]
+    if len(executed_tools) >= 2:
+        chain_tuple = tuple(executed_tools)
+        _session_tool_chains.append(chain_tuple)
+        if _session_tool_chains.count(chain_tuple) >= 2:
+            import tools.skills as ts
+            try:
+                existing_skills = ts.list_skills()
+                has_exact = any(
+                    tuple(st.get("tool") for st in sk.get("steps", [])) == chain_tuple
+                    for sk in existing_skills
+                )
+                if not has_exact:
+                    slug_name = "-".join(t.replace("_", "-") for t in executed_tools)
+                    suggested_slug = f"custom-{slug_name}"
+                    friendly_name = " -> ".join(t.replace("_", " ").title() for t in executed_tools) + " Routine"
+                    ret_outcome["skill_suggestion"] = {
+                        "suggested_slug": suggested_slug,
+                        "name": friendly_name,
+                        "description": f"Automated routine chaining {', '.join(executed_tools)}.",
+                        "steps": [{"tool": t, "args": {}} for t in executed_tools],
+                        "prompt_template": f"Summarize results from {', '.join(executed_tools)}: {{{{input}}}}",
+                    }
+            except Exception as e:
+                logger.debug("Failed computing habit-to-skill suggestion: %s", e)
+
+    return ret_outcome
 
 
 def handle_chat_send(req_id: Any, params: Dict[str, Any]):
     """Execute a user turn asynchronously on a background worker thread."""
-    text = params.get("text", "").strip()
-    if not text:
+    raw_text = params.get("text", "")
+    attachments = params.get("attachments", [])
+    if not isinstance(attachments, list):
+        attachments = []
+
+    text = str(raw_text or "").strip()
+    if not text and not attachments:
         send_response(req_id, {"reply": "", "model": "system", "type": "empty"})
         return
+
+    if not text and attachments:
+        text = "Analyze the attached file(s)."
 
     # Atomic turn admission and registration under _turn_threads_lock
     with _turn_threads_lock:
@@ -2735,7 +3167,22 @@ def handle_chat_send(req_id: Any, params: Dict[str, Any]):
         def _worker():
             t = threading.current_thread()
             try:
-                outcome = process_user_turn(text, prompt_fn=_confirmation_prompt_fn)
+                if attachments:
+                    from brain.attachments import extract_attachment_context, format_attachments_for_prompt
+                    extracted_attachments = [
+                        extract_attachment_context(att)
+                        for att in attachments
+                        if isinstance(att, dict)
+                    ]
+                    attachment_context = format_attachments_for_prompt(extracted_attachments)
+                    outcome = process_user_turn(
+                        text,
+                        prompt_fn=_confirmation_prompt_fn,
+                        attachment_context=attachment_context,
+                        attachments=extracted_attachments,
+                    )
+                else:
+                    outcome = process_user_turn(text, prompt_fn=_confirmation_prompt_fn)
                 send_response(req_id, outcome)
             except Exception as e:
                 logger.error("Error in process_user_turn: %s", e, exc_info=True)
@@ -2756,6 +3203,13 @@ def handle_chat_history(params: Dict[str, Any]) -> List[Dict[str, Any]]:
     if session_start_id is None:
         settings = _load_gui_settings()
         session_start_id = int(settings.get("chat_session_start_id", 0) or 0)
+        try:
+            conn = mem.get_connection()
+            max_row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM conversation_history").fetchone()
+            if max_row and max_row[0] < session_start_id:
+                session_start_id = 0
+        except Exception:
+            pass
     else:
         session_start_id = int(session_start_id)
 
@@ -2774,13 +3228,27 @@ def handle_chat_history(params: Dict[str, Any]) -> List[Dict[str, Any]]:
         )
         rows = cursor.fetchall()
         for r in reversed(rows):
-            turns.append({
+            turn_content = r[2]
+            att_meta = None
+            if "\n\n[Attachments: " in turn_content and turn_content.endswith("]"):
+                parts = turn_content.rsplit("\n\n[Attachments: ", 1)
+                try:
+                    json_str = parts[1][:-1] if parts[1].endswith("]") else parts[1]
+                    att_meta = json.loads(json_str)
+                    turn_content = parts[0]
+                except Exception:
+                    pass
+
+            turn_item = {
                 "id": r[0],
                 "role": r[1],
-                "content": r[2],
+                "content": turn_content,
                 "created_at": r[3],
                 "timestamp": r[3],
-            })
+            }
+            if att_meta:
+                turn_item["attachments"] = att_meta
+            turns.append(turn_item)
     except Exception as e:
         logger.warning("Error fetching chat history: %s", e)
     return turns
@@ -2790,8 +3258,17 @@ def handle_chat_new_session(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     Advance chat_session_start_id watermark to current MAX(id) in conversation_history.
     Allows user to start a fresh thread cleanly without deleting any conversation turns
-    or structured memory records.
+    or structured memory records. Also resets the in-memory session conversational state.
     """
+    global _session_conversational_state
+    _session_conversational_state = None
+    _session_tool_chains.clear()
+    if hasattr(main, "reset_session"):
+        try:
+            main.reset_session()
+        except Exception as e:
+            logger.warning("[CHAT-SESSION] Error calling main.reset_session: %s", e)
+
     main.ensure_initialized()
     max_id = 0
     try:
@@ -3300,6 +3777,98 @@ def handle_activity_get(params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def handle_skills_list(params: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return all registered Orange Skills with metadata, step count, and risk badges."""
+    import tools.skills as ts
+    user_data_dir = params.get("user_data_dir") if params else None
+    return ts.list_skills(user_data_dir=user_data_dir)
+
+
+def handle_skills_create(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Create and persist a new custom Orange Skill."""
+    import tools.skills as ts
+    params = params or {}
+    slug = params.get("slug", "")
+    name = params.get("name", "")
+    description = params.get("description", "")
+    steps = params.get("steps")
+    if not steps and params.get("command"):
+        cmd_str = str(params["command"]).strip()
+        if cmd_str.lower().startswith("git "):
+            steps = [{"tool": "run_command", "args": {"command": cmd_str}}]
+        else:
+            steps = [{"tool": "run_powershell", "args": {"command": cmd_str}}]
+    prompt_template = params.get("prompt_template", "")
+    user_data_dir = params.get("user_data_dir")
+    return ts.create_skill(
+        slug=slug,
+        name=name,
+        description=description,
+        steps=steps or [],
+        prompt_template=prompt_template,
+        user_data_dir=user_data_dir,
+    )
+
+
+def handle_skills_toggle(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Toggle enabled/disabled state of an Orange Skill."""
+    import tools.skills as ts
+    params = params or {}
+    slug = params.get("slug", "")
+    enabled = params.get("enabled")
+    user_data_dir = params.get("user_data_dir")
+    return ts.toggle_skill(slug=slug, enabled=enabled, user_data_dir=user_data_dir)
+
+
+def handle_skills_delete(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Delete a custom Orange Skill. Built-in skills are protected."""
+    import tools.skills as ts
+    params = params or {}
+    slug = params.get("slug", "")
+    user_data_dir = params.get("user_data_dir")
+    ts.delete_skill(slug=slug, user_data_dir=user_data_dir)
+    return {"deleted": True, "slug": slug}
+
+
+def handle_skills_run(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute an Orange Skill by slug, record activity, and return results."""
+    import tools.skills as ts
+    params = params or {}
+    slug = params.get("slug", "")
+    input_text = params.get("input", "")
+    user_data_dir = params.get("user_data_dir")
+    full_access_mode = tool_perm.get_full_access_mode()
+
+    exec_res = ts.execute_skill(
+        slug,
+        input_text=input_text,
+        full_access_mode=full_access_mode,
+        user_data_dir=user_data_dir,
+    )
+
+    try:
+        act_store = getattr(main, "activity_store", None)
+        if act_store and hasattr(act_store, "record_activity"):
+            act_store.record_activity("skill_execution", f"Executed skill: {slug}")
+    except Exception as e:
+        logger.debug("Failed recording activity for skill '%s': %s", slug, e)
+
+    synthesized = _synthesize_skill_response(
+        slug,
+        input_text,
+        exec_res.get("output", ""),
+        exec_res.get("step_results", []),
+    )
+    return {
+        "success": exec_res.get("success", False),
+        "status": exec_res.get("status"),
+        "slug": slug,
+        "step_results": exec_res.get("step_results", []),
+        "output": synthesized,
+        "reply": synthesized,
+    }
+
+
 def handle_tools_list(params: Dict[str, Any]) -> List[Dict[str, Any]]:
     from tools.registry import registry
     return registry.list_metadata()
@@ -3323,6 +3892,12 @@ def handle_permissions_audit(params: Dict[str, Any]) -> Dict[str, Any]:
         "admin_rights": is_admin,
         "tools": tools_list,
     }
+
+
+def handle_attachments_capture_screen(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Capture screen attachment and run local OCR extraction."""
+    from brain.attachments import capture_screen_attachment
+    return capture_screen_attachment()
 
 
 def handle_settings_get(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -3426,6 +4001,45 @@ def handle_settings_update(params: Dict[str, Any]) -> Dict[str, Any]:
             current["reminder_lead_times"] = updates["reminder_lead_times"]
         else:
             errors.append("reminder_lead_times must be a dictionary.")
+
+    if "hybrid_memory_extraction_enabled" in updates:
+        if isinstance(updates["hybrid_memory_extraction_enabled"], bool):
+            current["hybrid_memory_extraction_enabled"] = updates["hybrid_memory_extraction_enabled"]
+        else:
+            errors.append("hybrid_memory_extraction_enabled must be a boolean.")
+
+    if "adaptive_empathy_enabled" in updates:
+        if isinstance(updates["adaptive_empathy_enabled"], bool):
+            current["adaptive_empathy_enabled"] = updates["adaptive_empathy_enabled"]
+        else:
+            errors.append("adaptive_empathy_enabled must be a boolean.")
+
+    if "hybrid_memory_confidence_threshold" in updates:
+        try:
+            thresh = float(updates["hybrid_memory_confidence_threshold"])
+            current["hybrid_memory_confidence_threshold"] = max(0.5, min(1.0, thresh))
+        except (ValueError, TypeError):
+            errors.append("hybrid_memory_confidence_threshold must be a float between 0.5 and 1.0.")
+
+    if "minimize_to_tray_enabled" in updates:
+        if isinstance(updates["minimize_to_tray_enabled"], bool):
+            current["minimize_to_tray_enabled"] = updates["minimize_to_tray_enabled"]
+        else:
+            errors.append("minimize_to_tray_enabled must be a boolean.")
+
+    if "desktop_toasts_enabled" in updates:
+        if isinstance(updates["desktop_toasts_enabled"], bool):
+            current["desktop_toasts_enabled"] = updates["desktop_toasts_enabled"]
+        else:
+            errors.append("desktop_toasts_enabled must be a boolean.")
+
+    if "full_access_mode" in updates:
+        val = str(updates["full_access_mode"]).strip().lower()
+        if val in ("supervised", "unrestricted"):
+            current["full_access_mode"] = val
+            os.environ["ORANGE_FULL_ACCESS_MODE"] = val
+        else:
+            errors.append(f"Invalid full_access_mode: {updates['full_access_mode']}. Must be 'supervised' or 'unrestricted'.")
 
     if errors:
         return {
@@ -3926,6 +4540,12 @@ METHOD_REGISTRY: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "reminders.cancel": handle_reminders_cancel,
     "activity.get": handle_activity_get,
     "tools.list": handle_tools_list,
+    "skills.list": handle_skills_list,
+    "skills.create": handle_skills_create,
+    "skills.toggle": handle_skills_toggle,
+    "skills.delete": handle_skills_delete,
+    "skills.run": handle_skills_run,
+    "attachments.capture_screen": handle_attachments_capture_screen,
     "permissions.audit": handle_permissions_audit,
     "settings.get": handle_settings_get,
     "settings.update": handle_settings_update,
@@ -4015,7 +4635,7 @@ def main_loop():
     # Inform Rust supervisor that startup is ready (guaranteed first stdout frame)
     send_event("runtime.ready", {
         "pid": os.getpid(),
-        "version": "2.0.0",
+        "version": ORANGE_AI_VERSION,
         "timestamp": time.time(),
     })
 

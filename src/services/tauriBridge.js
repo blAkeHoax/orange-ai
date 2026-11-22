@@ -130,12 +130,16 @@ export async function shutdownRuntime() {
 // Chat & Conversation
 // ==========================================
 
-export async function sendMessage(text) {
+export async function sendMessage(text, attachments = []) {
   const tauri = await getTauri();
   if (tauri) {
-    return await tauri.core.invoke('send_message', { text });
+    return await tauri.core.invoke('send_message', { text, attachments });
   }
   return { reply: `Mock response to: "${text}"`, model: 'mock' };
+}
+
+export async function captureScreenAttachment() {
+  return await callRuntime('attachments.capture_screen', {});
 }
 
 export async function confirmAction(confirmationId, decision) {
@@ -312,6 +316,17 @@ export async function closeWindow() {
   }
 }
 
+export async function setMinimizeToTray(enabled) {
+  const tauri = await getTauri();
+  if (tauri) {
+    try {
+      return await tauri.core.invoke('set_minimize_to_tray', { enabled });
+    } catch (err) {
+      console.error('[TauriBridge] Error invoking set_minimize_to_tray:', err);
+    }
+  }
+}
+
 // ==========================================
 // External Navigation & Security
 // ==========================================
@@ -402,6 +417,27 @@ export async function triggerBriefing(options = { force: true }) {
     };
   }
   return await callRuntime('stage2c.trigger_briefing', options);
+}
+
+// Stage 5E: Reusable Orange Skills JSON-RPC Bridge
+export async function listSkills(params = {}) {
+  return await callRuntime('skills.list', params);
+}
+
+export async function createSkill(skillData) {
+  return await callRuntime('skills.create', skillData);
+}
+
+export async function toggleSkill(slug, enabled = null) {
+  return await callRuntime('skills.toggle', { slug, enabled });
+}
+
+export async function deleteSkill(slug) {
+  return await callRuntime('skills.delete', { slug });
+}
+
+export async function runSkill(slug, input = '') {
+  return await callRuntime('skills.run', { slug, input });
 }
 
 export async function onEvent(eventName, callback) {

@@ -514,8 +514,9 @@ class TestStage3PersonalContext(BaseStage3IsolatedTest):
 
         with patch.object(main.api_client, "assist", side_effect=mock_assist):
             outcome = main.process_user_turn("What is the next step?")
-            self.assertEqual(len(captured_calls), 1)
-            sys_inst = captured_calls[0].get("system_instruction", "")
+            primary_calls = [c for c in captured_calls if c.get("task_type") != "structured_output"]
+            self.assertEqual(len(primary_calls), 1)
+            sys_inst = primary_calls[0].get("system_instruction", "")
             self.assertIn("ACTIVE WORKSPACE & JOBS", sys_inst)
             self.assertIn("PulseEngine", sys_inst)
             self.assertIn("feat/audio-dsp", sys_inst)

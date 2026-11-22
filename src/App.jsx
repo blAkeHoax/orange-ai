@@ -3,6 +3,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import ApplicationShell from './components/ApplicationShell';
 import RecoveryView from './components/RecoveryView';
 import { getHandshakeStatus, retryHandshake } from './services/tauriBridge';
+import { startNotificationBridge } from './services/notificationBridge';
 import './styles/designTokens.css';
 import './styles/RecoveryView.css';
 
@@ -48,6 +49,15 @@ export default function App() {
   useEffect(() => {
     checkStatus();
   }, []);
+
+  useEffect(() => {
+    if (handshakeStatus === 'Ready') {
+      const stopBridge = startNotificationBridge();
+      return () => {
+        if (typeof stopBridge === 'function') stopBridge();
+      };
+    }
+  }, [handshakeStatus]);
 
   if (isInitializing) {
     return (

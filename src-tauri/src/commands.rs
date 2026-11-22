@@ -69,9 +69,15 @@ pub async fn get_jobs(supervisor: State<'_, Arc<RuntimeSupervisor>>) -> Result<V
 pub async fn send_message(
     supervisor: State<'_, Arc<RuntimeSupervisor>>,
     text: String,
+    attachments: Option<Value>,
 ) -> Result<Value, String> {
     let runtime = supervisor.get_runtime().await?;
-    runtime.call("chat.send", json!({ "text": text })).await
+    let mut params = serde_json::Map::new();
+    params.insert("text".to_string(), json!(text));
+    if let Some(att) = attachments {
+        params.insert("attachments".to_string(), att);
+    }
+    runtime.call("chat.send", Value::Object(params)).await
 }
 
 #[tauri::command]
@@ -257,9 +263,27 @@ pub async fn toggle_maximize_window(window: tauri::Window) -> Result<(), String>
     }
 }
 
+pub struct MinimizeToTrayState(pub std::sync::atomic::AtomicBool);
+
 #[tauri::command]
-pub async fn close_window(window: tauri::Window) -> Result<(), String> {
-    window.close().map_err(|e| e.to_string())
+pub async fn close_window(
+    window: tauri::Window,
+    min_state: State<'_, MinimizeToTrayState>,
+) -> Result<(), String> {
+    if min_state.0.load(std::sync::atomic::Ordering::SeqCst) {
+        window.hide().map_err(|e| e.to_string())
+    } else {
+        window.close().map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+pub fn set_minimize_to_tray(
+    min_state: State<'_, MinimizeToTrayState>,
+    enabled: bool,
+) -> Result<(), String> {
+    min_state.0.store(enabled, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]
