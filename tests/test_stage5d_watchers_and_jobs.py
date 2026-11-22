@@ -248,6 +248,112 @@ class TestStage5DWatchersAndJobs(BaseStage5DIsolatedTest):
         jobs_after_second = mgr.list_jobs(limit=100)
         self.assertEqual(len(jobs_after_second), 3)
 
+    def test_06_standing_jobs_reset_from_failed_state(self):
+        """ensure_default_standing_jobs resets standing jobs stuck in FAILED status back to PENDING."""
+        from brain.jobs.models import JobStatus
+        mgr = main.get_job_manager()
+        runtime_adapter.ensure_default_standing_jobs()
+        all_jobs = mgr.list_jobs(limit=100)
+        briefing_job = next(j for j in all_jobs if "briefing" in (j.tags or "").lower())
+
+        # Simulate prior failure loop: FAILED with Max attempts (3) reached
+        briefing_job.status = JobStatus.FAILED
+        briefing_job.attempt_count = 3
+        briefing_job.last_error = "Max attempts (3) reached. Last error: Terminated with WAITING_USER"
+        mgr.store.update_job(briefing_job)
+
+        refreshed = mgr.store.get_job(briefing_job.id)
+        self.assertEqual(refreshed.status, JobStatus.FAILED)
+
+        # Run ensure_default_standing_jobs: must reset failed standing job to PENDING
+        runtime_adapter.ensure_default_standing_jobs()
+
+        reset_job = mgr.store.get_job(briefing_job.id)
+        self.assertEqual(reset_job.status, JobStatus.PENDING)
+        self.assertEqual(reset_job.attempt_count, 0)
+        self.assertIsNone(reset_job.last_error)
+
+    def test_07_standing_briefing_job_deterministic_execution(self):
+        """Daily Morning Briefing standing job executes deterministically on Attempt 1."""
+        from brain.jobs.models import JobStatus
+        mgr = main.get_job_manager()
+        runtime_adapter.ensure_default_standing_jobs()
+        all_jobs = mgr.list_jobs(limit=100)
+        briefing_job = next(j for j in all_jobs if "briefing" in (j.tags or "").lower())
+
+        # Reset to PENDING if needed
+        briefing_job.status = JobStatus.PENDING
+        briefing_job.attempt_count = 0
+        mgr.store.update_job(briefing_job)
+
+        completed_job = mgr.start(briefing_job.id)
+        self.assertEqual(completed_job.status, JobStatus.COMPLETED)
+        self.assertEqual(completed_job.attempt_count, 1)
+        self.assertEqual(completed_job.step_count, 1)
+        self.assertTrue(len(completed_job.final_response) > 0)
+        self.assertIsNone(completed_job.last_error)
+
+        history = mgr.get_history(briefing_job.id)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].tool_name, "morning_briefing_pipeline")
+
+    def test_08_standing_hygiene_job_deterministic_execution(self):
+        """Workspace & Git Hygiene Audit standing job executes deterministically on Attempt 1."""
+        from brain.jobs.models import JobStatus
+        mgr = main.get_job_manager()
+        runtime_adapter.ensure_default_standing_jobs()
+        all_jobs = mgr.list_jobs(limit=100)
+        hygiene_job = next(j for j in all_jobs if "hygiene" in (j.tags or "").lower())
+
+        hygiene_job.status = JobStatus.PENDING
+        hygiene_job.attempt_count = 0
+        mgr.store.update_job(hygiene_job)
+
+        completed_job = mgr.start(hygiene_job.id)
+        self.assertEqual(completed_job.status, JobStatus.COMPLETED)
+        self.assertEqual(completed_job.attempt_count, 1)
+        self.assertEqual(completed_job.step_count, 1)
+        self.assertIn("Workspace & Git Hygiene Audit completed:", completed_job.final_response)
+        self.assertIsNone(completed_job.last_error)
+
+        history = mgr.get_history(hygiene_job.id)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].tool_name, "git_hygiene_audit")
+
+    def test_09_standing_reminders_job_deterministic_execution(self):
+        """Overdue Reminder & Blocker Escalation standing job executes deterministically on Attempt 1."""
+        from brain.jobs.models import JobStatus
+        mgr = main.get_job_manager()
+        runtime_adapter.ensure_default_standing_jobs()
+        all_jobs = mgr.list_jobs(limit=100)
+        reminders_job = next(j for j in all_jobs if "reminders" in (j.tags or "").lower())
+
+        reminders_job.status = JobStatus.PENDING
+        reminders_job.attempt_count = 0
+        mgr.store.update_job(reminders_job)
+
+        completed_job = mgr.start(reminders_job.id)
+        self.assertEqual(completed_job.status, JobStatus.COMPLETED)
+        self.assertEqual(completed_job.attempt_count, 1)
+        self.assertEqual(completed_job.step_count, 1)
+        self.assertTrue(
+            "No overdue reminders" in completed_job.final_response or "overdue reminder" in completed_job.final_response.lower()
+        )
+        self.assertIsNone(completed_job.last_error)
+
+        history = mgr.get_history(reminders_job.id)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].tool_name, "reminder_blocker_escalation")
+
+    def test_10_autonomous_non_clarification_rule_present(self):
+        """Verify the autonomous background job rule is registered in system constraints."""
+        import brain.agent_context as actx
+        matched = any(
+            "AUTONOMOUS BACKGROUND JOB RULE" in c and "NEVER ask the user clarifying questions" in c
+            for c in actx.AGENT_SYSTEM_CONSTRAINTS
+        )
+        self.assertTrue(matched, "Autonomous non-clarification rule missing from AGENT_SYSTEM_CONSTRAINTS")
+
 
 class TestStage5DMultiStepGoalLoop(BaseStage5DIsolatedTest):
     """Verifies bounded multi-step autonomous execution and safety guardrails."""

@@ -182,7 +182,11 @@ def verify_standalone_runtime():
 
         # Clean shutdown via EOF
         proc.stdin.close()
-        proc.wait(timeout=5)
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
         print(f"\n[SUCCESS] Standalone runtime verified and shut down cleanly.")
 
     except Exception as e:

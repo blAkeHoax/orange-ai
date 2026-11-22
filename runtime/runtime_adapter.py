@@ -99,7 +99,7 @@ import tools.system as tool_sys
 from brain import scheduler
 
 # Version & Protocol Specification
-ORANGE_AI_VERSION = "2.1.1"
+ORANGE_AI_VERSION = "2.1.2"
 ORANGE_AI_PROTOCOL_VERSION = "1.0"
 
 # Persistent GUI settings helper & Stage 2B Model/Proactive Configuration
@@ -1984,18 +1984,345 @@ def scan_workspace_watchers() -> Dict[str, Dict[str, Any]]:
     return results
 
 
+def is_standing_job(job: Any) -> Optional[str]:
+    """Check if a job corresponds to one of the 3 standing job types."""
+    tags = (getattr(job, "tags", "") or "").lower()
+    goal = (getattr(job, "goal", "") or "").strip().lower()
+
+    if "standing,briefing" in tags or "standing_briefing" in tags or "briefing" in tags or "morning briefing" in goal:
+        return "briefing"
+    if "standing,hygiene" in tags or "standing_hygiene" in tags or "hygiene" in tags or "hygiene audit" in goal:
+        return "hygiene"
+    if "standing,reminders" in tags or "standing_reminders" in tags or "reminders" in tags or "overdue reminder" in goal:
+        return "reminders"
+    return None
+
+
+def execute_standing_briefing_job(job: Any, store: Any) -> Any:
+    """
+    Deterministically execute 'Daily Morning Briefing & Priority Digest' standing job.
+    Executes the morning briefing pipeline directly, emits morning_briefing_ready,
+    records a completion JobStep, and marks the job COMPLETED on Attempt 1.
+    """
+    from brain.jobs.models import JobStatus, JobStep
+    now_utc = datetime.now(timezone.utc)
+    now_iso = now_utc.isoformat()
+
+    if getattr(job, "status", None) != JobStatus.RUNNING:
+        job.status = JobStatus.RUNNING
+        job.attempt_count = (getattr(job, "attempt_count", 0) or 0) + 1
+    if getattr(job, "attempt_count", 0) < 1:
+        job.attempt_count = 1
+    job.started_at = job.started_at or now_iso
+    job.updated_at = now_iso
+    if store and hasattr(store, "update_job"):
+        store.update_job(job)
+
+    try:
+        # Execute morning briefing pipeline directly
+        briefing_res = _evaluate_morning_briefing(force=True, sync=True)
+        if briefing_res and isinstance(briefing_res, dict):
+            content = briefing_res.get("content") or "Morning briefing synthesized successfully."
+        else:
+            content = "Morning briefing completed: Workspace and reminders state verified."
+            briefing_res = {"content": content, "status": "success"}
+
+        # Emit morning_briefing_ready proactive event
+        emit_proactive_event(
+            event_type="morning_briefing_ready",
+            entity_id=f"job_{job.id}",
+            payload={
+                "job_id": job.id,
+                "briefing": briefing_res,
+                "content": content,
+                "status": "ready",
+            },
+            event_id=f"evt_briefing_job_{job.id}_{int(now_utc.timestamp())}",
+        )
+
+        # Record completion JobStep
+        if store and hasattr(store, "record_step"):
+            finish_step = JobStep(
+                job_id=job.id,
+                attempt=job.attempt_count,
+                step_index=1,
+                action_type="FINISH",
+                tool_name="morning_briefing_pipeline",
+                reasoning="Deterministic execution of Daily Morning Briefing & Priority Digest",
+                success=True,
+                result_data_json=json.dumps({"briefing": briefing_res, "summary": content}, ensure_ascii=False),
+            )
+            store.record_step(finish_step)
+
+        job.status = JobStatus.COMPLETED
+        job.completed_at = datetime.now(timezone.utc).isoformat()
+        job.updated_at = job.completed_at
+        job.final_response = content
+        job.last_error = None
+        job.step_count = 1
+        if store and hasattr(store, "update_job"):
+            store.update_job(job)
+        logger.info("[STANDING-JOB %s] Daily Morning Briefing completed successfully.", job.id)
+        return job
+
+    except Exception as e:
+        logger.error("[STANDING-JOB %s] Morning briefing execution failed: %s", job.id, e, exc_info=True)
+        job.status = JobStatus.FAILED
+        job.last_error = f"Morning briefing execution failed: {e}"
+        job.completed_at = datetime.now(timezone.utc).isoformat()
+        job.updated_at = job.completed_at
+        if store and hasattr(store, "update_job"):
+            store.update_job(job)
+        return job
+
+
+def execute_standing_hygiene_job(job: Any, store: Any) -> Any:
+    """
+    Deterministically execute 'Workspace & Git Hygiene Audit' standing job.
+    Executes scan_workspace_watchers() directly, builds a structured summary of
+    uncommitted files, branches, and latest commits across workspaces,
+    records a completion JobStep, and marks the job COMPLETED on Attempt 1.
+    """
+    from brain.jobs.models import JobStatus, JobStep
+    now_utc = datetime.now(timezone.utc)
+    now_iso = now_utc.isoformat()
+
+    if getattr(job, "status", None) != JobStatus.RUNNING:
+        job.status = JobStatus.RUNNING
+        job.attempt_count = (getattr(job, "attempt_count", 0) or 0) + 1
+    if getattr(job, "attempt_count", 0) < 1:
+        job.attempt_count = 1
+    job.started_at = job.started_at or now_iso
+    job.updated_at = now_iso
+    if store and hasattr(store, "update_job"):
+        store.update_job(job)
+
+    try:
+        watchers = scan_workspace_watchers()
+        summary_lines = ["Workspace & Git Hygiene Audit completed:"]
+        total_uncommitted = 0
+        for ws_name, info in watchers.items():
+            branch = info.get("branch", "unknown")
+            uncommitted = info.get("uncommitted_changes_count", 0)
+            total_uncommitted += uncommitted
+            commit_iso = info.get("latest_commit_iso", "N/A")
+            commit_subj = info.get("latest_commit_subject", "N/A")
+            summary_lines.append(
+                f"- {ws_name} [{branch}]: {uncommitted} uncommitted files | Last commit: '{commit_subj}' ({commit_iso})"
+            )
+        if not watchers:
+            summary_lines.append("- No active git workspaces found.")
+        else:
+            summary_lines.append(f"Total uncommitted files across all workspaces: {total_uncommitted}.")
+        summary_text = "\n".join(summary_lines)
+
+        if store and hasattr(store, "record_step"):
+            finish_step = JobStep(
+                job_id=job.id,
+                attempt=job.attempt_count,
+                step_index=1,
+                action_type="FINISH",
+                tool_name="git_hygiene_audit",
+                reasoning="Deterministic execution of Workspace & Git Hygiene Audit via scan_workspace_watchers()",
+                success=True,
+                result_data_json=json.dumps({"watchers": watchers, "summary": summary_text}, ensure_ascii=False),
+            )
+            store.record_step(finish_step)
+
+        job.status = JobStatus.COMPLETED
+        job.completed_at = datetime.now(timezone.utc).isoformat()
+        job.updated_at = job.completed_at
+        job.final_response = summary_text
+        job.last_error = None
+        job.step_count = 1
+        if store and hasattr(store, "update_job"):
+            store.update_job(job)
+        logger.info("[STANDING-JOB %s] Workspace & Git Hygiene Audit completed successfully.", job.id)
+        return job
+
+    except Exception as e:
+        logger.error("[STANDING-JOB %s] Git hygiene audit failed: %s", job.id, e, exc_info=True)
+        job.status = JobStatus.FAILED
+        job.last_error = f"Git hygiene audit failed: {e}"
+        job.completed_at = datetime.now(timezone.utc).isoformat()
+        job.updated_at = job.completed_at
+        if store and hasattr(store, "update_job"):
+            store.update_job(job)
+        return job
+
+
+def execute_standing_reminders_job(job: Any, store: Any) -> Any:
+    """
+    Deterministically execute 'Overdue Reminder & Blocker Escalation' standing job.
+    Queries SQLite reminders table and structured_memories for overdue reminders and blockers,
+    emits reminder notifications if any found, records a completion JobStep,
+    and marks the job COMPLETED on Attempt 1.
+    """
+    from brain.jobs.models import JobStatus, JobStep
+    now_utc = datetime.now(timezone.utc)
+    now_iso = now_utc.isoformat()
+
+    if getattr(job, "status", None) != JobStatus.RUNNING:
+        job.status = JobStatus.RUNNING
+        job.attempt_count = (getattr(job, "attempt_count", 0) or 0) + 1
+    if getattr(job, "attempt_count", 0) < 1:
+        job.attempt_count = 1
+    job.started_at = job.started_at or now_iso
+    job.updated_at = now_iso
+    if store and hasattr(store, "update_job"):
+        store.update_job(job)
+
+    try:
+        overdue_reminders = []
+        active_blockers = []
+        with _get_db_connection() as conn:
+            cur = conn.cursor()
+            # 1. Overdue reminders
+            cur.execute(
+                "SELECT id, message, due_at, created_at FROM reminders WHERE fired = 0 AND due_at <= ? ORDER BY due_at ASC",
+                (now_iso,),
+            )
+            for row in cur.fetchall():
+                overdue_reminders.append({
+                    "id": row["id"] if isinstance(row, sqlite3.Row) else row[0],
+                    "message": row["message"] if isinstance(row, sqlite3.Row) else row[1],
+                    "due_at": row["due_at"] if isinstance(row, sqlite3.Row) else row[2],
+                })
+
+            # 2. Blockers in structured_memories
+            cur.execute(
+                """
+                SELECT id, category, memory_key, value FROM structured_memories
+                WHERE category IN ('blocker', 'project', 'goal', 'issue')
+                  AND (LOWER(category) = 'blocker' OR LOWER(memory_key) LIKE '%block%' OR LOWER(value) LIKE '%block%')
+                """
+            )
+            for row in cur.fetchall():
+                active_blockers.append({
+                    "id": row["id"] if isinstance(row, sqlite3.Row) else row[0],
+                    "category": row["category"] if isinstance(row, sqlite3.Row) else row[1],
+                    "key": row["memory_key"] if isinstance(row, sqlite3.Row) else row[2],
+                    "value": row["value"] if isinstance(row, sqlite3.Row) else row[3],
+                })
+
+        # Emit reminder notifications for overdue items
+        for r in overdue_reminders:
+            rem_id = r["id"]
+            evt_id = f"evt_standing_rem_{rem_id}_{int(now_utc.timestamp())}"
+            emit_proactive_event(
+                event_type="reminder_due",
+                entity_id=str(rem_id),
+                payload={
+                    "reminder_id": rem_id,
+                    "message": r.get("message", "Reminder overdue"),
+                    "due_at": r.get("due_at"),
+                    "escalated_by": "standing_job",
+                },
+                event_id=evt_id,
+            )
+
+        if not overdue_reminders and not active_blockers:
+            report_text = "No overdue reminders or active blockers found."
+        else:
+            report_lines = [f"Found {len(overdue_reminders)} overdue reminder(s) and {len(active_blockers)} active blocker(s):"]
+            for r in overdue_reminders:
+                report_lines.append(f"- Overdue Reminder #{r['id']}: '{r['message']}' (Due: {r['due_at']})")
+            for b in active_blockers:
+                report_lines.append(f"- Active Blocker [{b['category']}] {b['key']}: {b['value']}")
+            report_text = "\n".join(report_lines)
+
+        if store and hasattr(store, "record_step"):
+            finish_step = JobStep(
+                job_id=job.id,
+                attempt=job.attempt_count,
+                step_index=1,
+                action_type="FINISH",
+                tool_name="reminder_blocker_escalation",
+                reasoning="Deterministic execution of Overdue Reminder & Blocker Escalation",
+                success=True,
+                result_data_json=json.dumps({
+                    "overdue_reminders": overdue_reminders,
+                    "active_blockers": active_blockers,
+                    "report": report_text,
+                }, ensure_ascii=False),
+            )
+            store.record_step(finish_step)
+
+        job.status = JobStatus.COMPLETED
+        job.completed_at = datetime.now(timezone.utc).isoformat()
+        job.updated_at = job.completed_at
+        job.final_response = report_text
+        job.last_error = None
+        job.step_count = 1
+        if store and hasattr(store, "update_job"):
+            store.update_job(job)
+        logger.info("[STANDING-JOB %s] Overdue Reminder & Blocker Escalation completed: %s", job.id, report_text)
+        return job
+
+    except Exception as e:
+        logger.error("[STANDING-JOB %s] Reminders and blocker escalation failed: %s", job.id, e, exc_info=True)
+        job.status = JobStatus.FAILED
+        job.last_error = f"Reminders and blocker escalation failed: {e}"
+        job.completed_at = datetime.now(timezone.utc).isoformat()
+        job.updated_at = job.completed_at
+        if store and hasattr(store, "update_job"):
+            store.update_job(job)
+        return job
+
+
+def execute_job_with_standing_routing(runtime_instance: Any, job: Any) -> Any:
+    """
+    Intercept JobRuntime.execute_job to route standing jobs to deterministic handlers
+    and execute generic jobs through the standard AgentEngine loop.
+    """
+    job_type = is_standing_job(job)
+    store = getattr(runtime_instance, "store", None)
+    if not store:
+        main.ensure_initialized()
+        mgr = main.get_job_manager()
+        store = mgr.store if mgr else None
+
+    if job_type == "briefing":
+        return execute_standing_briefing_job(job, store)
+    elif job_type == "hygiene":
+        return execute_standing_hygiene_job(job, store)
+    elif job_type == "reminders":
+        return execute_standing_reminders_job(job, store)
+
+    # Generic Job -> delegate to original execute_job
+    return _original_job_runtime_execute_job(runtime_instance, job)
+
+
+# Install JobRuntime interception
+try:
+    from brain.jobs.runtime import JobRuntime
+    if not hasattr(JobRuntime, "_standing_routing_patched"):
+        _original_job_runtime_execute_job = JobRuntime.execute_job
+
+        def _patched_execute_job(self, job):
+            return execute_job_with_standing_routing(self, job)
+
+        JobRuntime.execute_job = _patched_execute_job
+        JobRuntime._standing_routing_patched = True
+        logger.info("[STANDING-JOBS] JobRuntime.execute_job intercepted for deterministic standing routing.")
+except Exception as e:
+    logger.warning("[STANDING-JOBS] Notice installing JobRuntime interception: %s", e)
+
+
 def ensure_default_standing_jobs() -> List[Any]:
     """
     Idempotently seed default recurring Agent Jobs when jobs.list is empty on startup.
     1. Daily Morning Briefing & Priority Digest
     2. Workspace & Git Hygiene Audit
     3. Overdue Reminder & Blocker Escalation
+    Also resets any failed standing jobs from previous attempts so they resume cleanly.
     """
     try:
         main.ensure_initialized()
         mgr = main.get_job_manager()
         if not mgr:
             return []
+        from brain.jobs.models import JobStatus
         existing = mgr.list_jobs(limit=100)
         existing_goals = {j.goal.strip().lower() for j in existing}
 
@@ -2004,6 +2331,25 @@ def ensure_default_standing_jobs() -> List[Any]:
             ("Workspace & Git Hygiene Audit", "standing,hygiene"),
             ("Overdue Reminder & Blocker Escalation", "standing,reminders"),
         ]
+
+        # Reset any failed standing jobs to PENDING with attempt_count=0
+        for j in existing:
+            goal_lower = j.goal.strip().lower()
+            tags_lower = (j.tags or "").lower()
+            is_standing = any(
+                goal.lower() == goal_lower or tags in tags_lower
+                for goal, tags in default_jobs
+            )
+            if is_standing:
+                status_str = (j.status.value if hasattr(j.status, "value") else str(j.status)).upper()
+                last_err = str(getattr(j, "last_error", "") or "").lower()
+                if status_str == "FAILED" or "max attempts" in last_err or "failed" in last_err:
+                    logger.info("[STANDING-JOBS] Resetting failed standing job '%s' (ID: %s) to PENDING", j.goal, j.id)
+                    j.status = JobStatus.PENDING
+                    j.attempt_count = 0
+                    j.last_error = None
+                    j.next_retry_at = None
+                    mgr.store.update_job(j)
 
         seeded = []
         for goal, tags in default_jobs:
@@ -2396,7 +2742,7 @@ def handle_system_shutdown_for_update(params: Dict[str, Any]) -> Dict[str, Any]:
     logger.info("[SHUTDOWN-FOR-UPDATE] Stage 2C background workers stopped and verified terminated.")
 
     # 5. Resolve target database path with test-mode permission check
-    custom_db = params.get("db_path")
+    custom_db = params.get("db_path") or params.get("custom_db_path")
     if custom_db:
         if not _is_test_mode_enabled():
             raise PermissionError("custom_db_path is strictly forbidden in production mode")
@@ -3341,6 +3687,16 @@ def handle_jobs_start(params: Dict[str, Any]) -> Dict[str, Any]:
     main.ensure_initialized()
     mgr = main.get_job_manager()
     job_id = params.get("job_id")
+    if mgr and hasattr(mgr, "store") and job_id:
+        from brain.jobs.models import JobStatus
+        resolved_id = mgr.store.resolve_job_id(job_id)
+        if resolved_id:
+            target_job = mgr.store.get_job(resolved_id)
+            if target_job and target_job.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+                target_job.status = JobStatus.PENDING
+                target_job.attempt_count = 0
+                target_job.last_error = None
+                mgr.store.update_job(target_job)
     job = mgr.start(job_id)
     return job.to_dict()
 

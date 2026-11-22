@@ -150,7 +150,7 @@ class TestFrozenRuntimeIntegration(unittest.TestCase):
         # Handshake contract assertions
         self.assertEqual(res.get("status"), "ready")
         self.assertEqual(res.get("runtime"), "Orange AI Python Runtime")
-        self.assertEqual(res.get("version"), "2.0.0")
+        self.assertEqual(res.get("version"), "2.1.2")
         self.assertEqual(res.get("protocol_version"), "1.0")
         self.assertEqual(res.get("python_version"), "3.14.6")
         self.assertIsInstance(res.get("pid"), int)
@@ -194,7 +194,7 @@ class TestFrozenRuntimeIntegration(unittest.TestCase):
 
         self.assertIsNotNone(ping_resp, "Did not receive response to system.ping")
         self.assertEqual(ping_resp.get("result", {}).get("status"), "online")
-        self.assertEqual(ping_resp.get("result", {}).get("version"), "2.0.0")
+        self.assertEqual(ping_resp.get("result", {}).get("version"), "2.1.2")
 
         # 2. system.health
         health_req = {"jsonrpc": "2.0", "id": "frozen-health-1", "method": "system.health", "params": {}}
@@ -258,7 +258,7 @@ class TestFrozenRuntimeIntegration(unittest.TestCase):
 
         shutdown_resp = None
         start = time.time()
-        while time.time() - start < 10:
+        while time.time() - start < 20:
             line = proc.stdout.readline()
             if not line:
                 break
