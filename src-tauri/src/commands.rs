@@ -33,7 +33,7 @@ pub async fn open_data_folder() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn open_official_releases() -> Result<(), String> {
-    let url = "https://github.com/blAkeHoax/orange-ai/releases/latest";
+    let url = "https://github.com/blAkeHoax/orange-ai-build/releases/latest";
     std::process::Command::new("cmd")
         .args(["/C", "start", "", url])
         .spawn()

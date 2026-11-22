@@ -66,7 +66,7 @@ export default function RecoveryView({ diagnostic, onRetry }) {
       case 'IncompatibleRuntimeVersion':
         return {
           title: 'Runtime Version Incompatibility',
-          description: `Desktop application version (v${details.desktop_version || '2.0.0'}) does not match Python runtime adapter version (v${details.runtime_version || 'unknown'}).`,
+          description: `Desktop application version (v${details.desktop_version || 'unknown'}) does not match Python runtime adapter version (v${details.runtime_version || 'unknown'}).`,
           badge: 'VERSION MISMATCH'
         };
       case 'UnsupportedProtocolVersion':
@@ -115,6 +115,8 @@ export default function RecoveryView({ diagnostic, onRetry }) {
   };
 
   const diagInfo = formatDiagnosticDetails();
+  const targetInstallerVersion = diagnostic?.details?.runtime_version || diagnostic?.details?.desktop_version || '2.1.1';
+  const installerFilename = `Orange AI_${targetInstallerVersion}_x64-setup.exe`;
 
   return (
     <div className="recovery-viewport">
@@ -184,7 +186,7 @@ export default function RecoveryView({ diagnostic, onRetry }) {
                 Visit the official Orange AI GitHub Releases page to obtain the official standalone installer.
               </li>
               <li>
-                Run the standalone installer (<code>Orange AI_2.0.0_x64-setup.exe</code>) to perform a clean repair over this installation directory.
+                Run the standalone installer (<code>{installerFilename}</code>) to perform a clean repair over this installation directory.
               </li>
               <li>
                 Your conversational memory and local settings will remain preserved.

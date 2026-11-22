@@ -98,7 +98,7 @@ class TestStage4_5BPhase3RuntimeHandshake(unittest.TestCase):
         resp = runtime_adapter.handle_system_handshake({})
         self.assertEqual(resp["status"], "ready")
         self.assertEqual(resp["runtime"], "Orange AI Python Runtime")
-        self.assertEqual(resp["version"], "2.0.0")
+        self.assertEqual(resp["version"], runtime_adapter.ORANGE_AI_VERSION)
         self.assertEqual(resp["protocol_version"], "1.0")
         self.assertIn("python_version", resp)
         self.assertTrue(resp["python_version"].startswith("3."))
@@ -296,7 +296,7 @@ class TestStage4_5BPhase3RuntimeHandshake(unittest.TestCase):
         ready_state = {
             "status": "Ready",
             "details": {
-                "desktop_version": "2.0.0",
+                "desktop_version": runtime_adapter.ORANGE_AI_VERSION,
                 "runtime_version": handshake_resp["version"],
                 "protocol_version": handshake_resp["protocol_version"],
                 "pid": handshake_resp["pid"],
@@ -304,8 +304,8 @@ class TestStage4_5BPhase3RuntimeHandshake(unittest.TestCase):
             }
         }
         self.assertEqual(ready_state["status"], "Ready")
-        self.assertEqual(ready_state["details"]["desktop_version"], "2.0.0")
-        self.assertEqual(ready_state["details"]["runtime_version"], "2.0.0")
+        self.assertEqual(ready_state["details"]["desktop_version"], runtime_adapter.ORANGE_AI_VERSION)
+        self.assertEqual(ready_state["details"]["runtime_version"], runtime_adapter.ORANGE_AI_VERSION)
         self.assertEqual(ready_state["details"]["protocol_version"], "1.0")
 
 

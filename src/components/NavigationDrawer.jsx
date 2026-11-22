@@ -47,7 +47,7 @@ export default function NavigationDrawer({
   const { theme, toggleTheme } = useTheme();
 
   // Updater states
-  const [appVersion, setAppVersion] = useState('2.0.0');
+  const [appVersion, setAppVersion] = useState('');
   const [updateStatus, setUpdateStatus] = useState('idle'); // 'idle' | 'checking' | 'uptodate' | 'available' | 'downloading' | 'error'
   const [targetVersion, setTargetVersion] = useState(null);
   const [downloadProgress, setDownloadProgress] = useState(0);
@@ -261,7 +261,9 @@ export default function NavigationDrawer({
                 ? `Install update v${targetVersion}`
                 : updateStatus === 'error'
                 ? errorMessage || 'No release feed yet'
-                : `Current version: v${appVersion}`
+                : appVersion
+                ? `Current version: v${appVersion}`
+                : 'Check for updates'
             }
             type="button"
           >
@@ -289,7 +291,7 @@ export default function NavigationDrawer({
                   <span className="drawer-update-icon is-uptodate">
                     <Check size={15} />
                   </span>
-                  <span className="drawer-update-label">Up to date (v{appVersion})</span>
+                  <span className="drawer-update-label">Up to date{appVersion ? ` (v${appVersion})` : ''}</span>
                 </>
               )}
 
@@ -326,7 +328,7 @@ export default function NavigationDrawer({
             </span>
 
             {/* Version Badge or Accent Tag */}
-            {updateStatus === 'idle' && (
+            {updateStatus === 'idle' && appVersion && (
               <span className="drawer-update-badge">v{appVersion}</span>
             )}
             {updateStatus === 'available' && (

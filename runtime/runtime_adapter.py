@@ -99,7 +99,7 @@ import tools.system as tool_sys
 from brain import scheduler
 
 # Version & Protocol Specification
-ORANGE_AI_VERSION = "2.1.0"
+ORANGE_AI_VERSION = "2.1.1"
 ORANGE_AI_PROTOCOL_VERSION = "1.0"
 
 # Persistent GUI settings helper & Stage 2B Model/Proactive Configuration

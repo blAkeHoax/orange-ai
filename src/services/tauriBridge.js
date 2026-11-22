@@ -53,16 +53,16 @@ export async function getHandshakeStatus() {
     return {
       status: 'IncompatibleRuntimeVersion',
       details: {
-        desktop_version: '2.0.0',
-        runtime_version: '2.0.1'
+        desktop_version: '2.1.1',
+        runtime_version: '2.1.0'
       }
     };
   }
   return {
     status: 'Ready',
     details: {
-      desktop_version: '2.0.0',
-      runtime_version: '2.0.0',
+      desktop_version: '2.1.1',
+      runtime_version: '2.1.1',
       protocol_version: '1.0',
       pid: 1234,
       capabilities: ['chat', 'memory', 'planner', 'tools', 'pre_update_quiescence']
@@ -80,7 +80,7 @@ export async function retryHandshake() {
       return { status: 'StartupFailed', details: { error: String(err) } };
     }
   }
-  return { status: 'Ready', details: { desktop_version: '2.0.0', runtime_version: '2.0.0', protocol_version: '1.0', pid: 1234 } };
+  return { status: 'Ready', details: { desktop_version: '2.1.1', runtime_version: '2.1.1', protocol_version: '1.0', pid: 1234 } };
 }
 
 export async function openDataFolder() {
@@ -96,7 +96,7 @@ export async function openOfficialReleases() {
   if (tauri) {
     return await tauri.core.invoke('open_official_releases');
   }
-  window.open('https://github.com/blAkeHoax/orange-ai/releases/latest', '_blank');
+  window.open('https://github.com/blAkeHoax/orange-ai-build/releases/latest', '_blank');
 }
 
 // ==========================================
@@ -108,7 +108,7 @@ export async function pingAdapter() {
   if (tauri) {
     return await tauri.core.invoke('ping');
   }
-  return { status: 'mock', version: '2.0.0', api_online: false };
+  return { status: 'mock', version: '2.1.1', api_online: false };
 }
 
 export async function getHealth() {

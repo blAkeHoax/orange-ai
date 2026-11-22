@@ -17,7 +17,7 @@ use crate::job_object::SafeJobObject;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-pub const DESKTOP_VERSION: &str = "2.0.0";
+pub const DESKTOP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SUPPORTED_PROTOCOL_VERSION: &str = "1.0";
 
 #[derive(Debug, Clone)]
