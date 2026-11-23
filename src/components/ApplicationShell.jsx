@@ -235,6 +235,8 @@ export default function ApplicationShell() {
               handleRecommendationCreated(evt);
             } else if (evt.event_type === 'reconciliation.ready' || evt.event_type === 'reconciliation_ready') {
               handleReconciliationReady(evt);
+            } else if (evt.event_type === 'idle_followup_posted') {
+              window.dispatchEvent(new CustomEvent('orange://chat-updated'));
             }
           }
         }
@@ -290,6 +292,20 @@ export default function ApplicationShell() {
       });
       unlisteners.push(uView);
 
+      // Listen for Stage 5G idle_followup_posted proactive events
+      const uIdle = await onEvent('idle_followup_posted', (payload) => {
+        window.dispatchEvent(new CustomEvent('orange://chat-updated'));
+        if (document.hidden) {
+          import('@tauri-apps/plugin-notification').then(({ sendNotification }) => {
+            sendNotification({
+              title: payload?.title || 'Orange AI',
+              body: payload?.body || payload?.message || 'Follow-up on your conversation.',
+            }).catch((err) => console.warn('Toast failed:', err));
+          }).catch((err) => console.warn('Notification plugin import failed:', err));
+        }
+      });
+      unlisteners.push(uIdle);
+
       // Listen for Tray trigger briefing event
       const uTrayBriefing = await onEvent('tray://trigger-briefing', () => {
         triggerBriefing({ force: true })
@@ -301,10 +317,28 @@ export default function ApplicationShell() {
       unlisteners.push(uTrayBriefing);
     }
 
+    const handleChatUpdated = async () => {
+      try {
+        const hist = await getChatHistory(60);
+        if (Array.isArray(hist)) {
+          setMessages(hist.map((h) => ({
+            role: h.role,
+            text: h.content,
+            timestamp: h.created_at ? new Date(h.created_at).getTime() : Date.now(),
+          })));
+        }
+      } catch (err) {
+        console.warn('Failed to reload chat history on update:', err);
+      }
+    };
+
+    window.addEventListener('orange://chat-updated', handleChatUpdated);
+
     initRuntime();
 
     return () => {
       window.removeEventListener('keydown', handleGlobalKeyDown);
+      window.removeEventListener('orange://chat-updated', handleChatUpdated);
       unlisteners.forEach((u) => {
         try { if (typeof u === 'function') u(); } catch (_) {}
       });

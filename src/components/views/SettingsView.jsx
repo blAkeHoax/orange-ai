@@ -101,6 +101,9 @@ export default function SettingsView() {
   const [adaptiveEmpathyEnabled, setAdaptiveEmpathyEnabled] = useState(true);
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.75);
   const [empathyStatusMsg, setEmpathyStatusMsg] = useState('');
+  const [idleFollowupsEnabled, setIdleFollowupsEnabled] = useState(true);
+  const [idleFollowupMinutes, setIdleFollowupMinutes] = useState(15);
+  const [activeWindowAwarenessEnabled, setActiveWindowAwarenessEnabled] = useState(true);
 
   // Idle Inactivity Threshold State (GAP-4A-7)
   const [idleThresholdMinutes, setIdleThresholdMinutes] = useState(10);
@@ -204,6 +207,15 @@ export default function SettingsView() {
       }
       if (typeof conf?.hybrid_memory_confidence_threshold === 'number') {
         setConfidenceThreshold(conf.hybrid_memory_confidence_threshold);
+      }
+      if (typeof conf?.idle_followups_enabled === 'boolean') {
+        setIdleFollowupsEnabled(conf.idle_followups_enabled);
+      }
+      if (typeof conf?.idle_followup_minutes === 'number') {
+        setIdleFollowupMinutes(conf.idle_followup_minutes);
+      }
+      if (typeof conf?.active_window_awareness_enabled === 'boolean') {
+        setActiveWindowAwarenessEnabled(conf.active_window_awareness_enabled);
       }
 
       // Populate System Tray & Desktop Toasts settings (Stage 5C)
@@ -445,6 +457,41 @@ export default function SettingsView() {
       flashEmpathyStatus(`✓ Confidence Threshold set to ${val.toFixed(2)}`);
     } catch (err) {
       flashEmpathyStatus('Error updating confidence threshold', true);
+    }
+  };
+
+  const handleToggleIdleFollowups = async () => {
+    const nextVal = !idleFollowupsEnabled;
+    setIdleFollowupsEnabled(nextVal);
+    try {
+      await updateSettings({ idle_followups_enabled: nextVal });
+      flashEmpathyStatus(nextVal ? '✓ Unprompted Idle Follow-Ups Enabled' : '✓ Unprompted Idle Follow-Ups Disabled');
+    } catch (err) {
+      setIdleFollowupsEnabled(!nextVal);
+      flashEmpathyStatus('Error updating idle follow-ups setting', true);
+    }
+  };
+
+  const handleSelectIdleFollowupMinutes = async (val) => {
+    if (val === idleFollowupMinutes) return;
+    setIdleFollowupMinutes(val);
+    try {
+      await updateSettings({ idle_followup_minutes: val });
+      flashEmpathyStatus(`✓ Idle Follow-Up Cooldown set to ${val} min`);
+    } catch (err) {
+      flashEmpathyStatus('Error updating idle follow-up cooldown', true);
+    }
+  };
+
+  const handleToggleActiveWindowAwareness = async () => {
+    const nextVal = !activeWindowAwarenessEnabled;
+    setActiveWindowAwarenessEnabled(nextVal);
+    try {
+      await updateSettings({ active_window_awareness_enabled: nextVal });
+      flashEmpathyStatus(nextVal ? '✓ Active-Window Awareness Enabled' : '✓ Active-Window Awareness Disabled');
+    } catch (err) {
+      setActiveWindowAwarenessEnabled(!nextVal);
+      flashEmpathyStatus('Error updating active-window awareness setting', true);
     }
   };
 
@@ -1072,6 +1119,66 @@ export default function SettingsView() {
                   </button>
                 ))}
               </div>
+            </div>
+
+            {/* Control 4: Unprompted Idle Follow-Ups (Stage 5G) */}
+            <div className="proactive-row">
+              <div className="proactive-label-group">
+                <span className="proactive-title">Unprompted Idle Follow-Ups</span>
+                <span className="proactive-subtitle">
+                  Send a natural check-in message when silence occurs during an open question, pending confirmation, or unresolved friction.
+                </span>
+              </div>
+              <button
+                type="button"
+                className={`switch-toggle-btn ${idleFollowupsEnabled ? 'is-active' : ''}`}
+                onClick={handleToggleIdleFollowups}
+                title={idleFollowupsEnabled ? 'Disable Idle Follow-Ups' : 'Enable Idle Follow-Ups'}
+              >
+                <span className="toggle-slider" />
+              </button>
+            </div>
+
+            {/* Cooldown selector for Idle Follow-Ups */}
+            {idleFollowupsEnabled && (
+              <div className="proactive-row is-sub-control">
+                <div className="proactive-label-group">
+                  <span className="proactive-title">Follow-Up Inactivity Cooldown</span>
+                  <span className="proactive-subtitle">
+                    Minimum silence duration before Orange AI checks in on an unresolved thread.
+                  </span>
+                </div>
+                <div className="cooldown-pill-group">
+                  {[15, 30, 60].map((mins) => (
+                    <button
+                      key={mins}
+                      type="button"
+                      className={`cooldown-pill-btn ${idleFollowupMinutes === mins ? 'is-active' : ''}`}
+                      onClick={() => handleSelectIdleFollowupMinutes(mins)}
+                    >
+                      {mins} min
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Control 5: Active-Window Situational Awareness (Stage 5G) */}
+            <div className="proactive-row">
+              <div className="proactive-label-group">
+                <span className="proactive-title">Active-Window Situational Awareness</span>
+                <span className="proactive-subtitle">
+                  Read foreground window titles (&lt; 1 ms) to adapt conversational context and defer interruptions during media or gaming (no continuous screen recording).
+                </span>
+              </div>
+              <button
+                type="button"
+                className={`switch-toggle-btn ${activeWindowAwarenessEnabled ? 'is-active' : ''}`}
+                onClick={handleToggleActiveWindowAwareness}
+                title={activeWindowAwarenessEnabled ? 'Disable Active-Window Awareness' : 'Enable Active-Window Awareness'}
+              >
+                <span className="toggle-slider" />
+              </button>
             </div>
           </div>
 

@@ -411,7 +411,7 @@ class TestStage45BPhase2DatabaseSafety(unittest.TestCase):
         race_threads = []
         num_callers = 15
 
-        def simulated_user_turn(text, prompt_fn=None):
+        def simulated_user_turn(text, prompt_fn=None, **kwargs):
             time.sleep(0.01)
             return {"reply": f"Reply to: {text}", "model": "mock"}
 

@@ -99,7 +99,7 @@ import tools.system as tool_sys
 from brain import scheduler
 
 # Version & Protocol Specification
-ORANGE_AI_VERSION = "2.1.2"
+ORANGE_AI_VERSION = "2.1.3"
 ORANGE_AI_PROTOCOL_VERSION = "1.0"
 
 # Persistent GUI settings helper & Stage 2B Model/Proactive Configuration
@@ -180,6 +180,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "minimize_to_tray_enabled": True,
     "desktop_toasts_enabled": True,
     "full_access_mode": "supervised",
+    "idle_followups_enabled": True,
+    "idle_followup_minutes": 15,
+    "active_window_awareness_enabled": True,
 }
 
 _BRIEFING_TIME_REGEX = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -333,6 +336,15 @@ def _load_gui_settings() -> Dict[str, Any]:
                     settings["desktop_toasts_enabled"] = data["desktop_toasts_enabled"]
                 if data.get("full_access_mode") in ("supervised", "unrestricted"):
                     settings["full_access_mode"] = data["full_access_mode"]
+                if isinstance(data.get("idle_followups_enabled"), bool):
+                    settings["idle_followups_enabled"] = data["idle_followups_enabled"]
+                if "idle_followup_minutes" in data:
+                    try:
+                        settings["idle_followup_minutes"] = max(5, min(120, int(data["idle_followup_minutes"])))
+                    except (ValueError, TypeError):
+                        pass
+                if isinstance(data.get("active_window_awareness_enabled"), bool):
+                    settings["active_window_awareness_enabled"] = data["active_window_awareness_enabled"]
                 # Preserve any extra legacy keys (excluding model to prevent obsolete overwrite)
                 for k, v in data.items():
                     if k not in settings and k != "model":
@@ -574,6 +586,14 @@ _session_conversational_state: Optional[Dict[str, Any]] = None
 _session_tool_chains: List[Tuple[str, ...]] = []
 _pending_confirmations: Dict[str, Dict[str, Any]] = {}
 _recommendation_actions: Dict[str, Dict[str, Any]] = {}
+_last_activity_ts: Optional[float] = None
+_idle_nudge_sent_for_turn: bool = False
+_latest_active_window: Dict[str, Any] = {
+    "process_name": "",
+    "window_title": "",
+    "category": "general",
+    "captured_at": 0.0,
+}
 
 
 def register_recommendation_action(rec_id: str, action_payload: Dict[str, Any]):
@@ -2363,6 +2383,184 @@ def ensure_default_standing_jobs() -> List[Any]:
         return []
 
 
+def _is_orange_ai_window(win_ctx: Dict[str, Any]) -> bool:
+    """Check if window context belongs to Orange AI itself."""
+    if not win_ctx:
+        return True
+    pname = (win_ctx.get("process_name") or "").lower()
+    title = (win_ctx.get("window_title") or "").lower()
+    if "orange ai" in title:
+        return True
+    if pname in ("orange ai.exe", "orange_ai.exe", "runtime_adapter.exe", "orange-ai.exe"):
+        return True
+    return False
+
+
+def evaluate_idle_followup(now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    """
+    Context-Gated Idle Follow-Ups (Stage 5G).
+    Evaluates whether to send at most one natural check-in message in Chat when the user
+    goes silent during an open question, pending confirmation, or unresolved debugging loop.
+    Enforces all 5 strict gates:
+      1. Enabled & Active Session
+      2. Bounded Silence Window
+      3. Quiet Hours Gate
+      4. Media / Game Focus Gate
+      5. Situational Salience Gate
+    """
+    global _idle_nudge_sent_for_turn, _last_activity_ts, _latest_active_window
+    settings = _load_gui_settings()
+
+    # Gate 1: Enabled & Active Session
+    if not settings.get("idle_followups_enabled", True):
+        return None
+    if _idle_nudge_sent_for_turn:
+        return None
+
+    session_start_id = int(settings.get("chat_session_start_id", 0) or 0)
+    session_turns: List[Dict[str, Any]] = []
+    try:
+        conn = mem.get_connection()
+        cursor = conn.execute(
+            """
+            SELECT id, role, content, created_at
+            FROM conversation_history
+            WHERE id > ?
+            ORDER BY id ASC
+            """,
+            (session_start_id,)
+        )
+        for row in cursor.fetchall():
+            session_turns.append({
+                "id": row[0],
+                "role": row[1],
+                "content": row[2],
+                "created_at": row[3],
+            })
+    except Exception as e:
+        logger.debug("[IDLE-FOLLOWUP] Failed to query conversation history: %s", e)
+        return None
+
+    if len(session_turns) < 2:
+        return None
+
+    # Gate 2: Bounded Silence Window
+    current_dt = now or datetime.now()
+    now_epoch = current_dt.timestamp()
+
+    activity_ts = _last_activity_ts
+    if activity_ts is None:
+        last_turn = session_turns[-1]
+        created_at_str = last_turn.get("created_at")
+        if created_at_str:
+            try:
+                dt_turn = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                activity_ts = dt_turn.timestamp()
+            except Exception:
+                activity_ts = now_epoch
+        else:
+            activity_ts = now_epoch
+
+    elapsed = now_epoch - activity_ts
+    cooldown_secs = float(settings.get("idle_followup_minutes", 15)) * 60.0
+    if not (cooldown_secs <= elapsed < 12.0 * 3600.0):
+        return None
+
+    # Gate 3: Quiet Hours Gate
+    if _is_within_quiet_hours(settings, current_dt):
+        return None
+
+    # Gate 4: Media / Game Focus Gate
+    if settings.get("active_window_awareness_enabled", True):
+        if _latest_active_window.get("category") == "media_or_game":
+            return None
+
+    # Gate 5: Situational Salience Gate
+    last_assistant_msg = ""
+    for turn in reversed(session_turns):
+        if turn.get("role") == "assistant":
+            last_assistant_msg = turn.get("content", "")
+            break
+
+    last_assistant_lower = last_assistant_msg.lower()
+    has_question_or_offer = (
+        "?" in last_assistant_msg
+        or any(phrase in last_assistant_lower for phrase in ("would you like", "want me to", "shall i", "let me know if"))
+    )
+
+    with _confirmations_lock:
+        has_pending_confirmation = bool(_pending_confirmations)
+
+    has_friction = False
+    if _session_conversational_state and isinstance(_session_conversational_state, dict):
+        tone = _session_conversational_state.get("emotional_tone")
+        load = _session_conversational_state.get("cognitive_load")
+        if tone == "frustrated" or load == "high":
+            has_friction = True
+
+    if not (has_question_or_offer or has_pending_confirmation or has_friction):
+        return None
+
+    # All 5 gates passed! Generate brief check-in
+    reply_text = None
+    try:
+        _ensure_api_client_configured()
+        win_info = ""
+        if settings.get("active_window_awareness_enabled", True) and _latest_active_window.get("process_name"):
+            win_info = f"Current active window: {_latest_active_window.get('process_name')} ({_latest_active_window.get('window_title')})."
+
+        prompt = (
+            f"The user has been silent for {int(elapsed // 60)} minutes following this assistant message:\n"
+            f"\"{last_assistant_msg[:300]}\"\n"
+            f"{win_info}\n"
+            "Generate a natural, polite 1-2 sentence check-in. If there is a pending action or open question, ask gently if they'd like to proceed or need anything else. Do not use filler or excessive cheerleading."
+        )
+        api_res = main.api_client.assist(
+            message=prompt,
+            history=[],
+            system_instruction="You are Orange AI performing a polite, brief 1-2 sentence conversational check-in. Be helpful, concise, and direct.",
+            task_type="chat",
+        )
+        if api_res and api_res.get("reply"):
+            reply_text = str(api_res["reply"]).strip()
+    except Exception as e:
+        logger.debug("[IDLE-FOLLOWUP] API assist failed for check-in: %s", e)
+
+    if not reply_text:
+        if has_pending_confirmation:
+            reply_text = "Just checking in—whenever you're ready, let me know if you'd like to proceed with the pending action or cancel it."
+        elif has_friction:
+            reply_text = "Checking in on this—let me know if you'd like to try an alternate fix or if you need any other help with this."
+        else:
+            reply_text = "Just following up on this—let me know if you need anything else or if you'd like to continue."
+
+    # Persist assistant follow-up turn
+    try:
+        main.save_turn("assistant", reply_text)
+    except Exception as e:
+        logger.warning("[IDLE-FOLLOWUP] Failed to save turn to history: %s", e)
+
+    _idle_nudge_sent_for_turn = True
+    _last_activity_ts = now_epoch
+
+    envelope = emit_proactive_event(
+        event_type="idle_followup_posted",
+        entity_id="idle_followup",
+        payload={
+            "title": "Orange AI",
+            "body": reply_text,
+            "message": reply_text,
+            "timestamp": current_dt.isoformat(),
+        }
+    )
+
+    return {
+        "success": True,
+        "reply": reply_text,
+        "event": envelope,
+    }
+
+
 def run_scheduler_tick(now: Optional[datetime] = None) -> Dict[str, Any]:
     """
     Execute a single 30-second background scheduler heartbeat tick.
@@ -2480,6 +2678,24 @@ def run_scheduler_tick(now: Optional[datetime] = None) -> Dict[str, Any]:
                 }
             )
 
+    # 5. Active Window Awareness (sampled < 1ms)
+    global _latest_active_window
+    if settings.get("active_window_awareness_enabled", True):
+        try:
+            from tools.system import get_active_window_context
+            cur_win = get_active_window_context()
+            if cur_win and cur_win.get("process_name") and not _is_orange_ai_window(cur_win):
+                _latest_active_window = cur_win
+        except Exception as e:
+            logger.debug("[ACTIVE-WINDOW] Sampling active window failed: %s", e)
+
+    # 6. Context-Gated Idle Follow-Ups (Stage 5G)
+    idle_followup_result = None
+    try:
+        idle_followup_result = evaluate_idle_followup(now=current_dt)
+    except Exception as e:
+        logger.warning("[SCHEDULER] Idle follow-up evaluation error: %s", e)
+
     return {
         "tick_at": current_dt.isoformat(),
         "quiet_hours": in_quiet,
@@ -2491,6 +2707,8 @@ def run_scheduler_tick(now: Optional[datetime] = None) -> Dict[str, Any]:
         "reminders_emitted": reminders_emitted,
         "watchers": watchers_data,
         "health_probe_executed": health_checked,
+        "idle_followup": idle_followup_result,
+        "active_window": _latest_active_window,
     }
 
 
@@ -3140,6 +3358,9 @@ def _synthesize_skill_response(
 def process_user_turn(
     user_input: str,
     prompt_fn: Optional[Callable[[str], str]] = None,
+    attachment_context: str = "",
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    active_window_note: str = "",
 ) -> Dict[str, Any]:
     """
     Execute one complete user turn with tool call detection, 3-tier permission guardrails,
@@ -3164,7 +3385,13 @@ def process_user_turn(
     # 2. If not a direct tool call, let main.process_user_turn process initial turn
     global _session_conversational_state
     if not direct_tool_call:
-        outcome = main.process_user_turn(text, prompt_fn=prompt_fn)
+        outcome = main.process_user_turn(
+            text,
+            prompt_fn=prompt_fn,
+            attachment_context=attachment_context,
+            attachments=attachments,
+            active_window_context=active_window_note,
+        )
         if "conversational_state" in outcome:
             _session_conversational_state = outcome["conversational_state"]
         reply_tool_call = extract_tool_call(outcome.get("reply", ""))
@@ -3497,12 +3724,28 @@ def handle_chat_send(req_id: Any, params: Dict[str, Any]):
         attachments = []
 
     text = str(raw_text or "").strip()
+
+    # Step 3: Natural "Look at My Screen" Routing (Stage 5G)
+    from brain.attachments import should_auto_capture_screen, capture_screen_attachment
+    if not attachments and should_auto_capture_screen(text):
+        try:
+            screen_att = capture_screen_attachment()
+            if screen_att:
+                attachments = [screen_att]
+        except Exception as e:
+            logger.warning("[SCREEN-ROUTING] Automatic screen capture failed: %s", e)
+
     if not text and not attachments:
         send_response(req_id, {"reply": "", "model": "system", "type": "empty"})
         return
 
     if not text and attachments:
         text = "Analyze the attached file(s)."
+
+    # Track activity for idle follow-ups and reset single-nudge turn gate
+    global _last_activity_ts, _idle_nudge_sent_for_turn
+    _last_activity_ts = time.time()
+    _idle_nudge_sent_for_turn = False
 
     # Atomic turn admission and registration under _turn_threads_lock
     with _turn_threads_lock:
@@ -3513,22 +3756,50 @@ def handle_chat_send(req_id: Any, params: Dict[str, Any]):
         def _worker():
             t = threading.current_thread()
             try:
+                # Active Window Awareness: sample situational context
+                active_window_note = ""
+                settings = _load_gui_settings()
+                if settings.get("active_window_awareness_enabled", True):
+                    global _latest_active_window
+                    if _latest_active_window and _latest_active_window.get("window_title"):
+                        if not _is_orange_ai_window(_latest_active_window):
+                            active_window_note = (
+                                f"Active Desktop Window: {_latest_active_window.get('process_name', '')} — "
+                                f"{_latest_active_window.get('window_title', '')}"
+                            )
+
                 if attachments:
                     from brain.attachments import extract_attachment_context, format_attachments_for_prompt
-                    extracted_attachments = [
-                        extract_attachment_context(att)
-                        for att in attachments
-                        if isinstance(att, dict)
-                    ]
+                    extracted_attachments = []
+                    for att in attachments:
+                        if isinstance(att, dict):
+                            if att.get("formatted_block"):
+                                extracted_attachments.append(att)
+                            else:
+                                extracted_attachments.append(extract_attachment_context(att))
                     attachment_context = format_attachments_for_prompt(extracted_attachments)
                     outcome = process_user_turn(
                         text,
                         prompt_fn=_confirmation_prompt_fn,
                         attachment_context=attachment_context,
                         attachments=extracted_attachments,
+                        active_window_note=active_window_note,
                     )
+                    outcome["attachments"] = [
+                        {
+                            "name": att.get("name", "attachment"),
+                            "kind": att.get("kind", "file"),
+                            "char_count": att.get("char_count", 0),
+                        }
+                        for att in extracted_attachments
+                    ]
                 else:
-                    outcome = process_user_turn(text, prompt_fn=_confirmation_prompt_fn)
+                    outcome = process_user_turn(
+                        text,
+                        prompt_fn=_confirmation_prompt_fn,
+                        active_window_note=active_window_note,
+                    )
+                _last_activity_ts = time.time()
                 send_response(req_id, outcome)
             except Exception as e:
                 logger.error("Error in process_user_turn: %s", e, exc_info=True)
@@ -3606,9 +3877,11 @@ def handle_chat_new_session(params: Dict[str, Any]) -> Dict[str, Any]:
     Allows user to start a fresh thread cleanly without deleting any conversation turns
     or structured memory records. Also resets the in-memory session conversational state.
     """
-    global _session_conversational_state
+    global _session_conversational_state, _last_activity_ts, _idle_nudge_sent_for_turn
     _session_conversational_state = None
     _session_tool_chains.clear()
+    _last_activity_ts = time.time()
+    _idle_nudge_sent_for_turn = False
     if hasattr(main, "reset_session"):
         try:
             main.reset_session()
@@ -4396,6 +4669,25 @@ def handle_settings_update(params: Dict[str, Any]) -> Dict[str, Any]:
             os.environ["ORANGE_FULL_ACCESS_MODE"] = val
         else:
             errors.append(f"Invalid full_access_mode: {updates['full_access_mode']}. Must be 'supervised' or 'unrestricted'.")
+
+    if "idle_followups_enabled" in updates:
+        if isinstance(updates["idle_followups_enabled"], bool):
+            current["idle_followups_enabled"] = updates["idle_followups_enabled"]
+        else:
+            errors.append("idle_followups_enabled must be a boolean.")
+
+    if "idle_followup_minutes" in updates:
+        try:
+            val = int(updates["idle_followup_minutes"])
+            current["idle_followup_minutes"] = max(5, min(120, val))
+        except (ValueError, TypeError):
+            errors.append(f"Invalid idle_followup_minutes: {updates['idle_followup_minutes']}. Must be between 5 and 120.")
+
+    if "active_window_awareness_enabled" in updates:
+        if isinstance(updates["active_window_awareness_enabled"], bool):
+            current["active_window_awareness_enabled"] = updates["active_window_awareness_enabled"]
+        else:
+            errors.append("active_window_awareness_enabled must be a boolean.")
 
     if errors:
         return {

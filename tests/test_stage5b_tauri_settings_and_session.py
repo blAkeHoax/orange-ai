@@ -227,7 +227,9 @@ class TestStage5BTauriSettingsAndSession(BaseStage5BIsolatedTest):
 
     def test_07_conversational_state_blending_across_turns(self):
         """Conversational state blends and persists across turns in runtime_adapter."""
-        with patch.object(main.api_client, "assist") as mock_assist:
+        with patch.object(main.api_client, "assist") as mock_assist, \
+             patch("brain.memory_classifier.datetime") as mock_dt:
+            mock_dt.now.return_value.hour = 14
             mock_assist.return_value = {
                 "reply": "Understood.",
                 "model": "nvidia/nemotron-3.5-bolt-e4b",

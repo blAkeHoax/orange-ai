@@ -51,6 +51,13 @@ export function formatEventToast(evt) {
     };
   }
 
+  if (eventType === 'idle_followup_posted') {
+    return {
+      title: payload.title || 'Orange AI',
+      body: payload.body || payload.message || 'Follow-up on your conversation.',
+    };
+  }
+
   return null;
 }
 
@@ -70,6 +77,9 @@ export async function processUnacknowledgedEvents() {
     const hasPermission = await ensureNotificationPermission();
 
     for (const evt of unacked) {
+      if (evt?.event_type === 'idle_followup_posted') {
+        window.dispatchEvent(new CustomEvent('orange://chat-updated'));
+      }
       const toastData = formatEventToast(evt);
       if (toastData && hasPermission && !evt?.payload?.suppress_toast) {
         try {
