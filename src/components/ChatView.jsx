@@ -158,7 +158,7 @@ export default function ChatView({
           </div>
         ) : (
           messages.map((msg, idx) => (
-            <div key={idx} className={`chat-message-row is-${msg.role}`}>
+            <div key={msg.id || `${msg.timestamp || 'msg'}-${idx}`} className={`chat-message-row is-${msg.role}`}>
               <div className="chat-avatar">
                 {msg.role === 'user' ? (
                   <User size={16} />

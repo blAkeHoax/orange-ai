@@ -4,6 +4,25 @@ import { getUnacknowledgedEvents, acknowledgeEvent, getSettings } from './tauriB
 
 let isListening = false;
 let pollInterval = null;
+let cachedSettings = null;
+let cachedSettingsTs = 0;
+const SETTINGS_CACHE_TTL = 60000;
+
+export function invalidateSettingsCache() {
+  cachedSettings = null;
+  cachedSettingsTs = 0;
+}
+
+async function getCachedSettings() {
+  const now = Date.now();
+  if (cachedSettings && (now - cachedSettingsTs) < SETTINGS_CACHE_TTL) {
+    return cachedSettings;
+  }
+  const settings = await getSettings();
+  cachedSettings = settings;
+  cachedSettingsTs = now;
+  return settings;
+}
 
 export async function ensureNotificationPermission() {
   try {
@@ -63,7 +82,7 @@ export function formatEventToast(evt) {
 
 export async function processUnacknowledgedEvents() {
   try {
-    const settings = await getSettings();
+    const settings = await getCachedSettings();
     const toastsEnabled = settings?.desktop_toasts_enabled !== false;
     if (!toastsEnabled) {
       return;
@@ -77,9 +96,6 @@ export async function processUnacknowledgedEvents() {
     const hasPermission = await ensureNotificationPermission();
 
     for (const evt of unacked) {
-      if (evt?.event_type === 'idle_followup_posted') {
-        window.dispatchEvent(new CustomEvent('orange://chat-updated'));
-      }
       const toastData = formatEventToast(evt);
       if (toastData && hasPermission && !evt?.payload?.suppress_toast) {
         try {

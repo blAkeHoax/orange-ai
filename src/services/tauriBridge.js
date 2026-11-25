@@ -126,6 +126,11 @@ export async function shutdownRuntime() {
   }
 }
 
+export async function prepareForUpdate() {
+  const tauri = await getTauri();
+  return tauri ? await tauri.core.invoke('prepare_for_update') : { status: 'ready_for_update' };
+}
+
 // ==========================================
 // Chat & Conversation
 // ==========================================

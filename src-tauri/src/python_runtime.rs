@@ -381,7 +381,13 @@ impl PythonRuntime {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
-        self.call_with_timeout(method, params, Duration::from_secs(120)).await
+        let timeout_duration = match method {
+            "chat.send" => Duration::from_secs(240),
+            "jobs.run" | "jobs.start" => Duration::from_secs(180),
+            "system.handshake" => Duration::from_secs(25),
+            _ => Duration::from_secs(30),
+        };
+        self.call_with_timeout(method, params, timeout_duration).await
     }
 
     pub async fn call_with_timeout(

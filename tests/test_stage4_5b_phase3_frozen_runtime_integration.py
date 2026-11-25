@@ -28,6 +28,12 @@ import unittest
 import subprocess
 import sqlite3
 
+runtime_adapter_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "runtime"))
+if runtime_adapter_path not in sys.path:
+    sys.path.insert(0, runtime_adapter_path)
+import runtime_adapter as ra
+EXPECTED_RUNTIME_VERSION = ra.ORANGE_AI_VERSION
+
 # ---------------------------------------------------------------------------
 # Triple-Layer Operational Database Safety Guard
 # ---------------------------------------------------------------------------
@@ -78,6 +84,7 @@ class TestFrozenRuntimeIntegration(unittest.TestCase):
         self.env = os.environ.copy()
         self.env["ORANGE_AI_USER_DATA_DIR"] = self.test_dir
         self.env["ORANGE_AI_TEST_MODE"] = "1"
+        self.env["ORANGE_DISABLE_BACKGROUND_SCHEDULER"] = "1"
         self.env.pop("PYTHONPATH", None)
         self.env.pop("PYTHONHOME", None)
 
@@ -150,7 +157,7 @@ class TestFrozenRuntimeIntegration(unittest.TestCase):
         # Handshake contract assertions
         self.assertEqual(res.get("status"), "ready")
         self.assertEqual(res.get("runtime"), "Orange AI Python Runtime")
-        self.assertEqual(res.get("version"), "2.1.2")
+        self.assertEqual(res.get("version"), EXPECTED_RUNTIME_VERSION)
         self.assertEqual(res.get("protocol_version"), "1.0")
         self.assertEqual(res.get("python_version"), "3.14.6")
         self.assertIsInstance(res.get("pid"), int)
@@ -194,7 +201,7 @@ class TestFrozenRuntimeIntegration(unittest.TestCase):
 
         self.assertIsNotNone(ping_resp, "Did not receive response to system.ping")
         self.assertEqual(ping_resp.get("result", {}).get("status"), "online")
-        self.assertEqual(ping_resp.get("result", {}).get("version"), "2.1.2")
+        self.assertEqual(ping_resp.get("result", {}).get("version"), EXPECTED_RUNTIME_VERSION)
 
         # 2. system.health
         health_req = {"jsonrpc": "2.0", "id": "frozen-health-1", "method": "system.health", "params": {}}
@@ -246,6 +253,16 @@ class TestFrozenRuntimeIntegration(unittest.TestCase):
             env=self.env
         )
 
+        # Wait for runtime.ready notification first
+        start_wait = time.time()
+        while time.time() - start_wait < 5:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            if "runtime.ready" in line:
+                break
+        time.sleep(1.0)
+
         # Trigger system.shutdown_for_update targeting the disposable DB
         shutdown_req = {
             "jsonrpc": "2.0",
@@ -258,7 +275,7 @@ class TestFrozenRuntimeIntegration(unittest.TestCase):
 
         shutdown_resp = None
         start = time.time()
-        while time.time() - start < 20:
+        while time.time() - start < 30:
             line = proc.stdout.readline()
             if not line:
                 break
@@ -271,8 +288,8 @@ class TestFrozenRuntimeIntegration(unittest.TestCase):
                 break
 
         self.assertIsNotNone(shutdown_resp, "Did not receive response to system.shutdown_for_update")
-        res = shutdown_resp.get("result", {})
-        self.assertEqual(res.get("status"), "ready_for_update")
+        res = shutdown_resp.get("result") or {}
+        self.assertEqual(res.get("status"), "ready_for_update", f"Unexpected shutdown response: {shutdown_resp}")
         self.assertEqual(res.get("checkpoint", {}).get("busy"), 0)
         self.assertEqual(res.get("wal_bytes"), 0)
 

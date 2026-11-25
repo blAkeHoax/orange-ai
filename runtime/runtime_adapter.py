@@ -87,7 +87,7 @@ if "ORANGE_AI_USER_DATA_DIR" not in os.environ:
 # Lazy import holder for core engine
 import main
 from brain.paths import get_user_data_dir
-from brain.database import resolve_database_path
+from brain.database import resolve_database_path, connect_database
 import brain.memory as mem
 from brain.api_client import OrangeAPIClient
 from brain.agent_models import AgentStatus
@@ -99,7 +99,7 @@ import tools.system as tool_sys
 from brain import scheduler
 
 # Version & Protocol Specification
-ORANGE_AI_VERSION = "2.1.3"
+ORANGE_AI_VERSION = "2.1.4"
 ORANGE_AI_PROTOCOL_VERSION = "1.0"
 
 # Persistent GUI settings helper & Stage 2B Model/Proactive Configuration
@@ -821,8 +821,7 @@ _active_turn_threads: set = set()
 def _get_db_connection(db_path: Optional[str] = None):
     """Yield a thread-safe short-lived connection to memory.db and close it deterministically."""
     target = db_path or resolve_database_path()
-    conn = sqlite3.connect(target, timeout=10.0)
-    conn.row_factory = sqlite3.Row
+    conn = connect_database(target, row_factory=sqlite3.Row)
     try:
         with conn:
             yield conn
@@ -1511,6 +1510,9 @@ def _inspect_workspace_git(workspace_path: str) -> Dict[str, Any]:
             cwd=workspace_path,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
             timeout=5.0,
         )
         if r_git.returncode != 0:
@@ -1523,6 +1525,9 @@ def _inspect_workspace_git(workspace_path: str) -> Dict[str, Any]:
             cwd=workspace_path,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
             timeout=5.0,
         )
         if r_branch.returncode == 0:
@@ -1533,6 +1538,9 @@ def _inspect_workspace_git(workspace_path: str) -> Dict[str, Any]:
             cwd=workspace_path,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
             timeout=5.0,
         )
         if r_head.returncode == 0:
@@ -1543,6 +1551,9 @@ def _inspect_workspace_git(workspace_path: str) -> Dict[str, Any]:
             cwd=workspace_path,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
             timeout=5.0,
         )
         if r_log.returncode == 0 and r_log.stdout.strip():
@@ -1563,6 +1574,9 @@ def _inspect_workspace_git(workspace_path: str) -> Dict[str, Any]:
             cwd=workspace_path,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
             timeout=5.0,
         )
         if r_status.returncode == 0 and r_status.stdout.strip():
@@ -1894,6 +1908,7 @@ _scheduler_stop_event = threading.Event()
 _scheduler_heartbeat_thread: Optional[threading.Thread] = None
 _workspace_failure_history: List[Dict[str, Any]] = []
 _last_health_check_ts: float = 0.0
+_last_watchers_scan_ts: float = 0.0
 
 
 def record_workspace_failure(workspace_name_or_path: str, error_detail: str = ""):
@@ -1958,6 +1973,9 @@ def scan_workspace_watchers() -> Dict[str, Dict[str, Any]]:
                 ["git", "-C", ws_path, "rev-parse", "--abbrev-ref", "HEAD"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
                 timeout=2.0,
             )
             branch = branch_proc.stdout.strip() if branch_proc.returncode == 0 else "unknown"
@@ -1967,6 +1985,9 @@ def scan_workspace_watchers() -> Dict[str, Dict[str, Any]]:
                 ["git", "-C", ws_path, "log", "-1", "--format=%ct|%cI|%s"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
                 timeout=2.0,
             )
             if ts_proc.returncode == 0 and ts_proc.stdout.strip():
@@ -1984,6 +2005,9 @@ def scan_workspace_watchers() -> Dict[str, Dict[str, Any]]:
                 ["git", "-C", ws_path, "status", "--porcelain"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
                 timeout=2.0,
             )
             uncommitted_count = len(stat_proc.stdout.strip().splitlines()) if stat_proc.stdout.strip() else 0
@@ -2573,7 +2597,7 @@ def run_scheduler_tick(now: Optional[datetime] = None) -> Dict[str, Any]:
     """
     current_dt = now or datetime.now()
     settings = _load_gui_settings()
-    global _last_health_check_ts
+    global _last_health_check_ts, _last_watchers_scan_ts
 
     in_quiet = _is_within_quiet_hours(settings, current_dt)
     desktop_toasts_enabled = settings.get("desktop_toasts_enabled", True)
@@ -2634,12 +2658,15 @@ def run_scheduler_tick(now: Optional[datetime] = None) -> Dict[str, Any]:
     except Exception as e:
         logger.warning("[SCHEDULER] Reminders check error: %s", e)
 
-    # 3. Workspace Watchers Git Activity
+    # 3. Workspace Watchers Git Activity (Throttled to once every 10 minutes = 600s)
     watchers_data = {}
-    try:
-        watchers_data = scan_workspace_watchers()
-    except Exception as e:
-        logger.warning("[SCHEDULER] Workspace watchers scan error: %s", e)
+    now_epoch = current_dt.timestamp()
+    if (now_epoch - _last_watchers_scan_ts) >= 600.0:
+        _last_watchers_scan_ts = now_epoch
+        try:
+            watchers_data = scan_workspace_watchers()
+        except Exception as e:
+            logger.warning("[SCHEDULER] Workspace watchers scan error: %s", e)
 
     # 4. Render /health Watchdog Probe (Throttled to once every 15 minutes = 900s)
     now_epoch = current_dt.timestamp()
@@ -2938,7 +2965,7 @@ def handle_system_shutdown_for_update(params: Dict[str, Any]) -> Dict[str, Any]:
 
     # 3. Stop scheduler and verify clean termination
     try:
-        scheduler.stop(wait_timeout=3.0)
+        scheduler.stop(wait_timeout=6.0)
     except Exception as e:
         raise RuntimeError(f"Scheduler stop failed with exception: {e}")
 
@@ -2948,7 +2975,9 @@ def handle_system_shutdown_for_update(params: Dict[str, Any]) -> Dict[str, Any]:
     with getattr(scheduler, "_thread_lock", threading.Lock()):
         job_worker = getattr(scheduler, "_active_job_thread", None)
     if job_worker is not None and job_worker.is_alive():
-        raise RuntimeError("Pre-update abort: scheduler job worker thread is still alive after stop timeout")
+        job_worker.join(timeout=6.0)
+        if job_worker.is_alive():
+            raise RuntimeError("Pre-update abort: scheduler job worker thread is still alive after stop timeout")
     logger.info("[SHUTDOWN-FOR-UPDATE] Scheduler stopped and verified terminated.")
 
     # 4. Stop Stage 2C background workers and verify termination
@@ -3087,6 +3116,14 @@ TOOL_RISK_MAP: Dict[str, RiskLevel] = {
     "get_battery": RiskLevel.SAFE,
     "todo_write": RiskLevel.SAFE,
     "get_clipboard": RiskLevel.SAFE,
+    "web_search": RiskLevel.SAFE,
+    "search": RiskLevel.SAFE,
+    "search_web": RiskLevel.SAFE,
+    "google": RiskLevel.SAFE,
+    "fetch_url": RiskLevel.SAFE,
+    "read_url": RiskLevel.SAFE,
+    "browse": RiskLevel.SAFE,
+    "get_url": RiskLevel.SAFE,
 
     # CONFIRMATION_REQUIRED tools (state changes, file creation/edits, apps, shell)
     "create_file": RiskLevel.CONFIRMATION_REQUIRED,
@@ -3318,6 +3355,21 @@ def _synthesize_safe_tool_response(
     elif tool_name in ("create_file", "write_file", "make_file"):
         target_path = tool_kwargs.get("path", "")
         return f"File '{target_path}' created successfully.\n\n{tool_output}"
+    elif tool_name in ("web_search", "search", "search_web", "google"):
+        if isinstance(tool_output, dict) and "results" in tool_output:
+            res_list = tool_output.get("results") or []
+            if not res_list:
+                return f"No search results found for '{tool_kwargs.get('query', '')}'."
+            formatted = [f"- **[{r.get('title', '')}]({r.get('url', '')})**\n  {r.get('snippet', '')}" for r in res_list]
+            return f"Search results for **{tool_kwargs.get('query', '')}**:\n\n" + "\n\n".join(formatted)
+        return f"{tool_output}"
+    elif tool_name in ("fetch_url", "read_url", "browse", "get_url"):
+        if isinstance(tool_output, dict):
+            title = tool_output.get("title", "")
+            content = tool_output.get("content", "")
+            url = tool_output.get("url", "")
+            return f"**{title}** ({url})\n\n{content[:2000]}"
+        return f"{tool_output}"
     else:
         return f"{tool_output}"
 
@@ -3381,6 +3433,16 @@ def process_user_turn(
 
     # 1. Check if user typed a direct tool call
     direct_tool_call = extract_tool_call(text)
+    if not direct_tool_call:
+        lowered = text.lower()
+        url_match = re.search(r'https?://[^\s<>"]+', text)
+        if url_match and any(w in lowered for w in ("summarize", "read", "fetch", "check", "inspect", "what is on", "tell me about", "open link")):
+            target_url = url_match.group(0).rstrip(".,;)")
+            direct_tool_call = ("fetch_url", {"url": target_url})
+        elif lowered.startswith(("search the web for ", "search online for ", "search for ", "google ", "web search ")):
+            search_query = re.sub(r'^(search the web for|search online for|search for|google|web search)\s+', '', text, flags=re.IGNORECASE).strip()
+            if search_query:
+                direct_tool_call = ("web_search", {"query": search_query})
 
     # 2. If not a direct tool call, let main.process_user_turn process initial turn
     global _session_conversational_state
@@ -3447,6 +3509,7 @@ def process_user_turn(
     # 3. We have a tool call to run! Execute via Bounded Multi-Step Goal Loop (up to 8 steps)
     MAX_GOAL_STEPS = 8
     tool_steps: List[Dict[str, Any]] = []
+    call_history: List[Tuple[str, str]] = []
     current_call = tool_call_to_run
     final_reply = ""
     last_tool_result = None
@@ -3455,6 +3518,8 @@ def process_user_turn(
 
     for step_idx in range(1, MAX_GOAL_STEPS + 1):
         tool_name, tool_kwargs = current_call
+        current_norm_args = json.dumps(tool_kwargs, sort_keys=True, default=str)
+        call_history.append((tool_name, current_norm_args))
         risk_level = get_tool_risk(tool_name)
         target_desc = (
             tool_kwargs.get("path")
@@ -3570,6 +3635,10 @@ def process_user_turn(
                 lookup_name = "edit_file"
             elif tool_name in ("remove_file", "delete_directory"):
                 lookup_name = "delete_file"
+            elif tool_name in ("search", "search_web", "google"):
+                lookup_name = "web_search"
+            elif tool_name in ("read_url", "browse", "get_url"):
+                lookup_name = "fetch_url"
 
             exec_result = registry.execute(
                 lookup_name,
@@ -3649,9 +3718,30 @@ def process_user_turn(
                     cand = ""
                 next_call = extract_tool_call(cand)
                 if next_call:
-                    if next_call == current_call and step_success:
+                    next_name, next_kwargs = next_call
+                    next_norm_args = json.dumps(next_kwargs, sort_keys=True, default=str)
+                    next_key = (next_name, next_norm_args)
+                    current_key = (tool_name, current_norm_args)
+
+                    # 1. Immediate repeated action break (consecutive repetition)
+                    if next_key == current_key:
+                        logger.warning("[GOAL-LOOP] Immediate repeated action detected: %s. Breaking loop.", next_name)
                         final_reply = _synthesize_safe_tool_response(tool_name, tool_kwargs, step_output, text)
                         break
+
+                    # 2. 2-cycle detection (A -> B -> A -> B)
+                    if len(call_history) >= 3 and next_key == call_history[-2] and current_key == call_history[-1] and call_history[-3] == next_key:
+                        logger.warning("[GOAL-LOOP] 2-cycle action loop detected (%s <-> %s). Breaking loop.", next_name, tool_name)
+                        final_reply = f"Action cycle detected between '{next_name}' and '{tool_name}'. Stopping execution to prevent an infinite loop. Latest output:\n{step_output}"
+                        break
+
+                    # 3. Repeated failure of the same tool across recent steps
+                    recent_same_fails = sum(1 for (name, _), s in zip(call_history[-3:], tool_steps[-3:]) if name == next_name and not s.get("success", False))
+                    if recent_same_fails >= 2:
+                        logger.warning("[GOAL-LOOP] Tool '%s' repeatedly failed (%d times). Breaking loop.", next_name, recent_same_fails)
+                        final_reply = f"Action '{next_name}' failed repeatedly. Stopping execution. Last error:\n{step_output}"
+                        break
+
                     current_call = next_call
                     continue
                 else:
@@ -3882,6 +3972,16 @@ def handle_chat_new_session(params: Dict[str, Any]) -> Dict[str, Any]:
     _session_tool_chains.clear()
     _last_activity_ts = time.time()
     _idle_nudge_sent_for_turn = False
+
+    # Cancel and release any pending confirmations on session reset
+    with _confirmations_lock:
+        for cid, container in list(_pending_confirmations.items()):
+            try:
+                container["decision"] = "no"
+                container["event"].set()
+            except Exception as e:
+                logger.warning("[CHAT-SESSION] Error canceling pending confirmation %s: %s", cid, e)
+        _pending_confirmations.clear()
     if hasattr(main, "reset_session"):
         try:
             main.reset_session()

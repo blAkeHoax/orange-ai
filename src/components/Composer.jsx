@@ -18,12 +18,20 @@ export default function Composer({ onSendMessage, disabled = false }) {
 
   const processFile = (file) => {
     if (!file) return;
+    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB limit
+    if (file.size > MAX_FILE_SIZE) {
+      alert(`File "${file.name}" exceeds the 10 MB limit (${(file.size / (1024 * 1024)).toFixed(1)} MB). Please select a smaller file.`);
+      return;
+    }
+
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const isImage = ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif'].includes(ext);
+
     const reader = new FileReader();
     reader.onload = (e) => {
       const base64Data = e.target.result;
-      const ext = (file.name.split('.').pop() || '').toLowerCase();
       let kind = 'file';
-      if (['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif'].includes(ext)) {
+      if (isImage) {
         kind = 'image';
       } else if (ext === 'pdf') {
         kind = 'pdf';
@@ -31,19 +39,60 @@ export default function Composer({ onSendMessage, disabled = false }) {
         kind = 'code';
       }
 
-      const newAttachment = {
-        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        name: file.name,
-        kind,
-        mime_type: file.type || (kind === 'pdf' ? 'application/pdf' : 'application/octet-stream'),
-        base64_data: base64Data,
-        size: file.size,
-        preview_meta:
-          file.size > 1024 * 1024
-            ? `${(file.size / (1024 * 1024)).toFixed(1)} MB`
-            : `${Math.round(file.size / 1024)} KB`,
+      const attachRecord = (finalBase64, finalSize) => {
+        const newAttachment = {
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          name: file.name,
+          kind,
+          mime_type: file.type || (kind === 'pdf' ? 'application/pdf' : 'application/octet-stream'),
+          base64_data: finalBase64,
+          size: finalSize,
+          preview_meta:
+            finalSize > 1024 * 1024
+              ? `${(finalSize / (1024 * 1024)).toFixed(1)} MB`
+              : `${Math.round(finalSize / 1024)} KB`,
+        };
+        setAttachments((prev) => [...prev, newAttachment]);
       };
-      setAttachments((prev) => [...prev, newAttachment]);
+
+      if (isImage && typeof window !== 'undefined' && window.Image) {
+        const img = new Image();
+        img.onload = () => {
+          const maxDimension = 1600;
+          if (img.width > maxDimension || img.height > maxDimension) {
+            let width = img.width;
+            let height = img.height;
+            if (width > height) {
+              if (width > maxDimension) {
+                height = Math.round((height * maxDimension) / width);
+                width = maxDimension;
+              }
+            } else {
+              if (height > maxDimension) {
+                width = Math.round((width * maxDimension) / height);
+                height = maxDimension;
+              }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(img, 0, 0, width, height);
+              const downscaledBase64 = canvas.toDataURL(file.type || 'image/jpeg', 0.85);
+              attachRecord(downscaledBase64, Math.round(downscaledBase64.length * 0.75));
+              return;
+            }
+          }
+          attachRecord(base64Data, file.size);
+        };
+        img.onerror = () => {
+          attachRecord(base64Data, file.size);
+        };
+        img.src = base64Data;
+      } else {
+        attachRecord(base64Data, file.size);
+      }
     };
     reader.readAsDataURL(file);
   };

@@ -21,6 +21,7 @@ import {
 import { getVersion } from '@tauri-apps/api/app';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { prepareForUpdate } from '../services/tauriBridge';
 import { useTheme } from '../context/ThemeContext';
 import orbImg from '../assets/logo_orb_64.png';
 import '../styles/NavigationDrawer.css';
@@ -141,6 +142,12 @@ export default function NavigationDrawer({
     setDownloadProgress(0);
 
     try {
+      try {
+        await prepareForUpdate();
+      } catch (prepErr) {
+        console.warn('[AutoUpdater] prepareForUpdate non-blocking error:', prepErr);
+      }
+
       let downloaded = 0;
       let total = 0;
 
